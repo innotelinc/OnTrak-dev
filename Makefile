@@ -67,7 +67,7 @@ up: secrets ## One command: first-run setup (secrets, then Incus on the host), s
 	$(COMPOSE) up -d --build
 	@echo "==> portal    http://localhost:$${ONTRAK_PORTAL__PORT:-8080}"
 	@echo "==> console   http://localhost:$${ONTRAK_PORTAL__PORT:-8080}/guacamole/"
-	@echo "==> sign in   instructor / ONTRAK_PORTAL__ADMIN_PASSWORD in .env"
+	@echo "==> sign in   through Authentik (set the ONTRAK_PORTAL__OIDC_* values in .env)"
 	@echo "==> first run make setup-log   lab health: make exec ARGS=doctor"
 
 up-remote: secrets ## Start the stack with no host hypervisor (remote cluster / demo)

@@ -218,7 +218,7 @@ Next steps:
   2. make golden                       # build the golden Windows image (long)
   3. infra/lab-services.sh             # create the intranet targets the scenarios test against
   4. make templates                    # build tpl-<scenario> + clean snapshots
-  5. make seed-admin && make serve
+  5. make serve                        # sign-in is Authentik's — see docs/operations.md
 
 Guests on $NETWORK can reach the internet through NAT but cannot reach this host's
 management network. Keep the portal and Guacamole off this bridge (see docs/operations.md).

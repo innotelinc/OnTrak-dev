@@ -63,7 +63,7 @@ def settings(tmp_path):
             "incus": {"image_alias": "ontrak-win-base", "network": "ontrak0"},
             "pool": {"default_target": 0, "targets": {}, "max_total": 4},
             "guac": {"secret_key": GUAC_KEY, "base_url": "http://guac.test/guacamole/"},
-            "portal": {"secret": "test-portal-secret", "admin_password": "admin-pass"},
+            "portal": {"secret": "test-portal-secret"},
         }
     )
 
@@ -105,8 +105,6 @@ def built_template(manager, incus):
 # --------------------------------------------------------------------------- #
 # the portal
 # --------------------------------------------------------------------------- #
-ALICE = ("alice", "alice-pw")
-TEACHER = ("teacher", "teach-pw")
 
 
 @pytest.fixture
@@ -115,13 +113,25 @@ def app_env(settings, store, incus):
 
     Yields ``(client, app)``. Shared by the portal and admin-panel suites so both
     exercise the same wiring the entrypoint does, rather than a re-declared app.
+
+    The two accounts are rows without a credential, which is all any account is
+    now: sign-in is Authentik's, and these suites mint the session the OIDC
+    callback would (see `login`).
     """
     if TestClient is None:  # pragma: no cover - exercised only without fastapi
         pytest.skip("fastapi/httpx not installed")
     from ontrak.portal.app import create_app
 
-    store.upsert_user("alice", "alice-pw", "student", "Alice A")
-    store.upsert_user("teacher", "teach-pw", "instructor", "Teacher T")
+    store.upsert_user("alice", "student", "Alice A")
+    store.upsert_user("teacher", "instructor", "Teacher T")
+    # A representative range: pointed at Authentik, so the login page renders the
+    # real thing rather than the "not set up" state. The sign-in itself is done
+    # with `login` below; test_oidc.py drives the IdP half.
+    settings.portal.oidc_issuer = OIDC_ISSUER
+    settings.portal.oidc_client_id = "ontrak"
+    settings.portal.oidc_client_secret = "ontrak-client-secret"
+    settings.portal.oidc_redirect_uri = ",".join(OIDC_CALLBACKS)
+    settings.portal.oidc_instructor_group = "range-instructors"
     driver = NullDriver(
         settings, responses={"setup.ps1": "ONTRAK-SETUP-OK", "check.ps1": _pass_payload()}
     )
@@ -143,17 +153,35 @@ def _pass_payload() -> str:
     return f"{JSON_BEGIN}{json.dumps({'checks': checks})}{JSON_END}"
 
 
-def login(client, username: str, password: str, follow: bool = True):
-    """Sign in, minting a CSRF cookie first the way the browser flow does."""
-    token = client.cookies.get("ontrak_csrf") or ""
-    if not token:
-        client.get("/login")
-        token = client.cookies.get("ontrak_csrf")
-    return client.post(
-        "/login",
-        data={"username": username, "password": password, "csrf": token or ""},
-        follow_redirects=follow,
+def login(client, username: str = "alice"):
+    """Sign in a seeded account.
+
+    There is no password path to exercise any more, so this mints exactly what the
+    OIDC callback issues: a signed session cookie for the account row. Authentik's
+    own half of the flow is covered in tests/test_oidc.py.
+    """
+    from ontrak import auth
+
+    app = client.app
+    user = app.state.store.get_user(username)
+    assert user is not None, f"no account row for {username!r}"
+    client.cookies.set(
+        auth.COOKIE_NAME,
+        auth.sign_cookie(
+            {"username": user["username"], "role": user["role"]},
+            app.state.settings.portal.secret,
+        ),
+        # Scoped to the test host, so the cookie the logout route clears is the
+        # same one it sent — an unscoped cookie here survives a working logout.
+        domain="testserver.local",
+        path="/",
     )
+    # The audit trail records a sign-in, exactly as the OIDC callback does.
+    app.state.store.log_event("login", user["username"])
+    # And a page render is what mints the CSRF cookie the POSTs below need — the
+    # same way a browser picks it up on the way in.
+    client.get("/dashboard")
+    return client
 
 
 def csrf(client) -> str:
@@ -161,10 +189,42 @@ def csrf(client) -> str:
 
 
 def as_student(client, username: str = "alice"):
-    login(client, username, "alice-pw")
-    return client
+    return login(client, username)
 
 
 def as_instructor(client):
-    login(client, *TEACHER)
-    return client
+    return login(client, "teacher")
+
+
+# --------------------------------------------------------------------------- #
+# the portal, signed in through Authentik
+# --------------------------------------------------------------------------- #
+# The range's own values (scripts/cerulean-provision.py registers exactly these
+# callbacks). Authentik itself is stood in for in tests/test_oidc.py.
+OIDC_ISSUER = "https://auth.cerulean.innotel.us/application/o/ontrak/"
+OIDC_CALLBACKS = (
+    "https://ontrak.innotel.us/oidc/callback",
+    "https://student.ontrak.innotel.us/oidc/callback",
+    "https://admin.ontrak.innotel.us/oidc/callback",
+)
+
+
+@pytest.fixture
+def sso_env(settings, store, incus):
+    """A portal wired to Authentik: sign-in through the IdP, and nothing else.
+
+    Yields ``(client, app)``. This is the shipped posture — SSO is the only way
+    in — and it is the one a sign-in has to survive.
+    """
+    if TestClient is None:  # pragma: no cover - exercised only without fastapi
+        pytest.skip("fastapi/httpx not installed")
+    from ontrak.portal.app import create_app
+
+    settings.portal.oidc_issuer = OIDC_ISSUER
+    settings.portal.oidc_client_id = "ontrak"
+    settings.portal.oidc_client_secret = "ontrak-client-secret"
+    settings.portal.oidc_redirect_uri = ",".join(OIDC_CALLBACKS)
+    settings.portal.oidc_instructor_group = "range-instructors"
+    app = create_app(settings, incus=incus, driver=NullDriver(settings, responses={}))
+    with TestClient(app) as client:
+        yield client, app

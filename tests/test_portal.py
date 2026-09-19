@@ -45,16 +45,10 @@ def test_dashboard_requires_login(app_client):
     assert "Sign in" in response.text
 
 
-def test_wrong_password_is_rejected(app_client):
+def test_a_signed_in_student_lands_on_the_dashboard(app_client):
     client, _ = app_client
-    response = login(client, "alice", "wrong-password", follow=False)
-    assert response.status_code == 401
-    assert "wrong password" in response.text
-
-
-def test_valid_login_lands_on_the_dashboard(app_client):
-    client, _ = app_client
-    response = login(client, "alice", "alice-pw")
+    login(client, "alice")
+    response = client.get("/dashboard")
     assert response.status_code == 200
     assert "Your training machines" in response.text
     assert "Nothing resolves on the intranet" in response.text  # a scenario title
@@ -62,7 +56,7 @@ def test_valid_login_lands_on_the_dashboard(app_client):
 
 def test_logout_clears_the_session(app_client):
     client, _ = app_client
-    login(client, "alice", "alice-pw")
+    login(client, "alice")
     response = client.post("/logout", data={"csrf": csrf(client)}, follow_redirects=True)
     assert response.status_code == 200
     assert "Sign in" in response.text
@@ -71,17 +65,17 @@ def test_logout_clears_the_session(app_client):
 
 def test_csrf_is_enforced_on_posts(app_client):
     client, _ = app_client
-    login(client, "alice", "alice-pw")
+    login(client, "alice")
     response = client.post("/sessions/start", data={"scenario_id": SCENARIO, "csrf": "forged"})
     assert response.status_code == 400
 
 
 def test_instructor_area_requires_the_role(app_client):
     client, _ = app_client
-    login(client, "alice", "alice-pw")
+    login(client, "alice")
     assert client.get("/instructor").status_code == 403
     client.post("/logout", data={"csrf": csrf(client)})
-    login(client, "teacher", "teach-pw")
+    login(client, "teacher")
     assert client.get("/instructor").status_code == 200
 
 
@@ -90,7 +84,7 @@ def test_instructor_area_requires_the_role(app_client):
 # --------------------------------------------------------------------------- #
 def test_full_student_flow(app_client):
     client, app = app_client
-    login(client, "alice", "alice-pw")
+    login(client, "alice")
 
     start = client.post("/sessions/start", data={"scenario_id": SCENARIO, "csrf": csrf(client)})
     assert start.status_code == 200  # redirect followed
@@ -141,7 +135,7 @@ def test_full_student_flow(app_client):
 
 def test_hints_unlock_only_after_an_attempt(app_client):
     client, app = app_client
-    login(client, "alice", "alice-pw")
+    login(client, "alice")
     client.post("/sessions/start", data={"scenario_id": SCENARIO, "csrf": csrf(client)})
     session = provision(app)
 
@@ -157,7 +151,7 @@ def test_hints_unlock_only_after_an_attempt(app_client):
 
 def test_reset_hands_over_a_clean_machine(app_client):
     client, app = app_client
-    login(client, "alice", "alice-pw")
+    login(client, "alice")
     client.post("/sessions/start", data={"scenario_id": SCENARIO, "csrf": csrf(client)})
     session = provision(app)
     instance = session.instance
@@ -177,7 +171,7 @@ def test_reset_hands_over_a_clean_machine(app_client):
 def test_a_student_cannot_open_someone_elses_session(app_client):
     client, app = app_client
     other = app.state.manager.allocate("bob", SCENARIO)
-    login(client, "alice", "alice-pw")
+    login(client, "alice")
 
     response = client.get(f"/sessions/{other.id}")
     assert response.status_code == 200
@@ -195,7 +189,7 @@ def test_a_student_cannot_open_someone_elses_session(app_client):
 
 def test_end_session_destroys_the_vm(app_client):
     client, app = app_client
-    login(client, "alice", "alice-pw")
+    login(client, "alice")
     client.post("/sessions/start", data={"scenario_id": SCENARIO, "csrf": csrf(client)})
     session = provision(app)
     instance = session.instance
@@ -212,7 +206,7 @@ def test_end_session_destroys_the_vm(app_client):
 def test_instructor_page_shows_pool_and_results(app_client):
     client, app = app_client
     app.state.manager.allocate("bob", SCENARIO)
-    login(client, "teacher", "teach-pw")
+    login(client, "teacher")
     page = client.get("/instructor")
     assert page.status_code == 200
     assert "Capacity: templates and warm pool" in page.text
@@ -224,7 +218,7 @@ def test_results_csv_export(app_client):
     client, app = app_client
     session = app.state.manager.allocate("bob", SCENARIO)
     app.state.manager.complete(session)
-    login(client, "teacher", "teach-pw")
+    login(client, "teacher")
     response = client.get("/instructor/results.csv")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/csv")
@@ -234,7 +228,7 @@ def test_results_csv_export(app_client):
 
 def test_instructor_can_prewarm_and_rebuild_templates(app_client):
     client, app = app_client
-    login(client, "teacher", "teach-pw")
+    login(client, "teacher")
     prewarm = client.post(
         "/instructor/prewarm",
         data={"scenario_id": SCENARIO, "count": 2, "csrf": csrf(client)},
@@ -251,7 +245,7 @@ def test_instructor_can_prewarm_and_rebuild_templates(app_client):
 
 def test_students_cannot_reach_instructor_actions(app_client):
     client, _ = app_client
-    login(client, "alice", "alice-pw")
+    login(client, "alice")
     response = client.post(
         "/instructor/prewarm", data={"scenario_id": SCENARIO, "count": 5, "csrf": csrf(client)}
     )

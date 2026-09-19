@@ -147,13 +147,19 @@ make doctor                                                    # host healthy?
 .venv/bin/ontrak scenario validate                           # catalogue healthy?
 .venv/bin/ontrak template build --all                        # after any scenario edit
 .venv/bin/ontrak pool prewarm --scenario net-dns-failure --count 30
-.venv/bin/ontrak user import --csv roster.csv --default-password 'ChangeMe!2026'
 make serve          # terminal 1: portal
 make reap           # terminal 2: expiry + pool top-ups
 ```
 
 Prewarm only the scenario(s) you are teaching now. Keeping a pool warm for all
 six scenarios multiplies idle RAM by six for no benefit.
+
+There is no roster to import: sign-in is Authentik's, and the portal creates an
+account on the first sign-in, keyed on the account's Authentik **email** address.
+Provision the class in Authentik (and, if you gate the range to a cohort, set
+`ONTRAK_PORTAL__OIDC_REQUIRED_GROUP`) before the session — a student who signs in
+before that still lands on the row that holds their results, because the row is
+their email either way.
 
 ### During
 
@@ -199,7 +205,7 @@ for the whole class: a cluster does not make a cold Windows boot faster.
 | Leaked instances | `incus --project ontrak list` and delete anything that is not `tpl-*` or an active session; `ontrak stats` shows the state counts |
 | Control plane database | `state/ontrak.sqlite3` (WAL) on the host, or the `ontrak-state` volume when the portal runs in Docker (`docker run --rm -v ontrak-state:/s alpine tar czf - -C /s . > ontrak-state.tgz`). Back it up if results matter; deleting it resets users/results, not VMs |
 | Logs | `journalctl -u incus`, `make logs` (or `docker compose logs -f`) for the stack, and the portal's events table (`/admin/audit`) |
-| Instructor passwords | `ontrak user add --username X --password Y --role instructor` |
+| Who is an instructor | membership of the Authentik group in `ONTRAK_PORTAL__OIDC_INSTRUCTOR_GROUP` (read on every sign-in). There is no local account to promote — change the group in Authentik |
 | Reclaim RAM fast | set `pool.targets` to 0, then `ontrak pool status` and delete pool VMs, or just stop them with `incus stop` |
 
 ## Troubleshooting
@@ -217,6 +223,72 @@ for the whole class: a cluster does not make a cold Windows boot faster.
 | Pool keeps growing and the host swaps | refill targets too high for a full class | Lower `pool.targets`, or `pool.max_total`; remember targets count claimed VMs, so `target = class size` is the right shape |
 | Grading returns 0% with "grading could not run" | `check.ps1` failed or never printed the markers | Run it manually in a session; `make validate` first, then check the guest-side error in the network detail line |
 | Scores look wrong after an image change | the check reads live state that moved (an adapter name, a service name) | Prefer outcome-based checks (`docs/scenarios.md`); open a session and inspect the `-Detail` strings |
+
+## Sign-in
+
+The portal has no password of its own. An instructor and a student are
+**Authentik** accounts in Cerulean, and the portal only decides what a signed-in
+account may do — one list of who exists, one place to disable someone, and
+nothing on the range to keep in step.
+
+Cerulean registers the application, and prints the client secret for it:
+
+```bash
+# in Cerulean's checkout
+python3 scripts/authentik-setup.py ontrak
+```
+
+Then set the four `ONTRAK_PORTAL__OIDC_*` values in `.env` (see `.env.example`)
+and restart the portal. All four are needed: with any one missing the flow is off
+and the login page says which values are expected instead of rendering a button
+that leads nowhere.
+
+**The callback is per origin.** The sign-in returns to the origin it started on,
+and Authentik only accepts a callback it was registered with — so every origin
+the portal answers on is listed in `ONTRAK_PORTAL__OIDC_REDIRECT_URI`. The range
+answers on three names (`scripts/cerulean-provision.py` creates them):
+
+```
+https://ontrak.innotel.us/oidc/callback
+https://student.ontrak.innotel.us/oidc/callback
+https://admin.ontrak.innotel.us/oidc/callback
+```
+
+A name whose callback is missing cannot sign in at all — the IdP refuses the
+redirect before anyone types a password. A `Host` header naming an origin that is
+*not* on the list falls back to the first entry, so a forged one cannot create a
+new callback.
+
+**Roles come from Authentik groups**, read on every sign-in: a member of
+`ONTRAK_PORTAL__OIDC_INSTRUCTOR_GROUP` is an instructor (the class view, reset and
+the admin panel), everyone else who signs in is a student. Adding someone to the
+group grants that view and removing them takes it away, with no local edit and no
+second place to keep in step. An Authentik superuser is always an instructor, so
+the range's owner is never locked out of it. Set
+`ONTRAK_PORTAL__OIDC_REQUIRED_GROUP` to gate the whole range to one class cohort.
+
+The portal's account is keyed on the Authentik **email address**. An account
+Authentik authenticates but has no email for is refused rather than given an
+invented name; the fix belongs in Authentik.
+
+### There is no password path
+
+There is no local account and no password form, anywhere: `POST /login` does not
+exist, and the portal holds no credential of its own. An account appears on the
+range the first time its owner signs in through Authentik, keyed on their email
+address — and because Authentik is re-read on every sign-in, adding someone to
+the instructor group grants the class view and removing them takes it away, with
+nothing to keep in step locally.
+
+Two consequences worth knowing. A *disabled* account stays disabled: an
+instructor taking a student off the board is not undone by that student signing
+in again. And **deleting** an account in the admin panel only removes the local
+row — identity is Authentik's, so the person can sign straight back in. Revoke
+the person in Authentik; use disable for the range's own control.
+
+`ontrak demo serve` is the one exception, and only for itself: a demo has no IdP
+to sign in against, so the portal opens a demo-only door — pick a demo account,
+no password — mounted only while `demo.enabled` is on.
 
 ## Security and audit notes
 

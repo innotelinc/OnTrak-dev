@@ -58,9 +58,6 @@ echo "==> generating local secrets in ${ENV_FILE}"
 # Signs portal session cookies. Rotating it logs every student out; nothing else
 # breaks, which is why this one is safe to regenerate.
 fill ONTRAK_PORTAL__SECRET 32
-# The instructor account. Printed here only as "generated" — read it back out of
-# the file (or `ontrak user seed-admin` to set your own).
-fill ONTRAK_PORTAL__ADMIN_PASSWORD 16
 # Exactly 32 hex characters: Guacamole's JSON auth rejects anything else, and it
 # must be identical in the portal and the gateway.
 fill ONTRAK_GUAC__SECRET_KEY 16

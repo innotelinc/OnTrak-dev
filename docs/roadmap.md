@@ -29,9 +29,10 @@ planned. Anything in the last two sections is a statement of intent, not a featu
   serves every page with no Incus socket mounted.
 - The one-command install, both halves of it. `docker compose up` on a machine with no
   `.env` and no Incus writes the secrets, publishes the shared portal/console key, and brings
-  both services up healthy — with the generated instructor password logging into the admin
-  panel, and a payload the portal signed accepted by the live gateway as a connection the
-  student can open. The host half runs `infra/bootstrap-host.sh` inside the host's own
+  both services up healthy — the login page saying sign-in is not set up until the range is
+  pointed at Cerulean, since sign-in itself is Authentik's and there is no local account
+  (docs/operations.md), and a payload the portal signed accepted by the live gateway as a
+  connection the student can open. The host half runs `infra/bootstrap-host.sh` inside the host's own
   namespaces, and that script was exercised end to end against a real Incus daemon: the
   upstream package install, the daemon, the storage pool, the lab bridge, the project and
   the limits profile — run twice, to prove a re-run changes nothing. What the dev host here

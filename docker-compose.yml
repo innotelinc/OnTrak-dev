@@ -137,9 +137,19 @@ services:
       # lab-setup wrote, which is what lets `docker compose up` work before .env
       # exists (compose cannot interpolate a secret that is not there yet).
       ONTRAK_PORTAL__SECRET: ${ONTRAK_PORTAL__SECRET:-}
-      # Seeded as the instructor account on boot, and the admin panel's login.
-      ONTRAK_PORTAL__ADMIN_USER: ${ONTRAK_PORTAL__ADMIN_USER:-instructor}
-      ONTRAK_PORTAL__ADMIN_PASSWORD: ${ONTRAK_PORTAL__ADMIN_PASSWORD:-}
+      # ── Cerulean / Authentik sign-in (docs/operations.md "Sign-in") ──
+      # The portal is SSO-only and keeps no password: with none of these set it
+      # comes up with a login page that says so, and there is no local fallback.
+      # `ONTRAK_PORTAL__OIDC_REDIRECT_URI` lists every origin the portal answers
+      # on; `ONTRAK_PORTAL__OIDC_CLIENT_SECRET` is a credential — give it to the
+      # container like the rest, or as a `vault://` reference the deployment
+      # resolves (see .env.example).
+      ONTRAK_PORTAL__OIDC_ISSUER: ${ONTRAK_PORTAL__OIDC_ISSUER:-}
+      ONTRAK_PORTAL__OIDC_CLIENT_ID: ${ONTRAK_PORTAL__OIDC_CLIENT_ID:-}
+      ONTRAK_PORTAL__OIDC_CLIENT_SECRET: ${ONTRAK_PORTAL__OIDC_CLIENT_SECRET:-}
+      ONTRAK_PORTAL__OIDC_REDIRECT_URI: ${ONTRAK_PORTAL__OIDC_REDIRECT_URI:-}
+      ONTRAK_PORTAL__OIDC_INSTRUCTOR_GROUP: ${ONTRAK_PORTAL__OIDC_INSTRUCTOR_GROUP:-}
+      ONTRAK_PORTAL__OIDC_REQUIRED_GROUP: ${ONTRAK_PORTAL__OIDC_REQUIRED_GROUP:-}
       # Must equal JSON_SECRET_KEY below: the portal signs console links with it
       # and Guacamole verifies them. One value, two services.
       ONTRAK_GUAC__SECRET_KEY: ${ONTRAK_GUAC__SECRET_KEY:-}

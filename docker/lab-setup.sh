@@ -72,7 +72,7 @@ write_secrets() {
     printf '# Written by docker/lab-setup.sh on the first run. The portal and the\n'
     printf '# console gateway read this when their environment has no value — which is\n'
     printf '# what makes a bare "docker compose up" work before a .env exists.\n'
-    grep -E '^(ONTRAK_PORTAL__SECRET|ONTRAK_GUAC__SECRET_KEY|ONTRAK_PORTAL__ADMIN_PASSWORD)=' \
+    grep -E '^(ONTRAK_PORTAL__SECRET|ONTRAK_GUAC__SECRET_KEY)=' \
       "$PROJECT_DIR/.env"
   } >"$SECRETS_FILE"
   chmod 644 "$SECRETS_FILE" 2>/dev/null || true
@@ -230,7 +230,7 @@ case "$guac_url" in
 esac
 printf '      published   bind %s, port %s (the portal and the console share it)\n' \
   "${ONTRAK_BIND_ADDR:-127.0.0.1}" "${ONTRAK_PORTAL__PORT:-8080}"
-printf '      sign in     %s / the password in .env (ONTRAK_PORTAL__ADMIN_PASSWORD)\n' \
-  "${ONTRAK_PORTAL__ADMIN_USER:-instructor}"
+printf '      sign in     through Authentik — set the four ONTRAK_PORTAL__OIDC_*\n'
+printf '      %s\n' "                  values in .env (docs/operations.md#sign-in)"
 printf '      verify lab  docker compose exec portal python3 -m ontrak doctor\n'
 exit 0

@@ -58,8 +58,8 @@ def broken_app(settings, store, repo):
 
     from ontrak.portal.app import create_app
 
-    store.upsert_user("teacher", "teach-pw", "instructor", "Teacher T")
-    store.upsert_user("alice", "alice-pw", "student", "Alice A")
+    store.upsert_user("teacher", "instructor", "Teacher T")
+    store.upsert_user("alice", "student", "Alice A")
     incus = UnreachableIncus(image_alias=settings.incus.image_alias)
     app = create_app(settings, incus=incus, driver=NullDriver(settings))
     with TestClient(app) as client:
@@ -189,7 +189,7 @@ def test_the_instructor_banner_does_not_stick_to_later_pages(broken_app, setting
 def test_the_dashboard_still_works_without_a_hypervisor(broken_app):
     """A student with no reachable Incus gets an error, not a stack trace."""
     client, _ = broken_app
-    login(client, "alice", "alice-pw")
+    login(client, "alice")
     assert client.get("/dashboard").status_code == 200
 
 

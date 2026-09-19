@@ -33,7 +33,7 @@ students ──► portal (FastAPI)  ──► session manager ──► incus �
 
 | Piece | Responsibility | Where |
 | --- | --- | --- |
-| Portal | login, workload picker, console iframe, check/complete buttons, results, instructor console | `ontrak/portal/` |
+| Portal | Authentik SSO sign-in, workload picker, console iframe, check/complete buttons, results, instructor console | `ontrak/portal/` |
 | Session manager | template build, warm pool, allocation, grading, reset, time limits, complete-and-destroy | `ontrak/sessions.py` |
 | Incus client | every VM/snapshot operation, via the `incus` CLI | `ontrak/incus.py` |
 | Guest driver | runs the scenario scripts inside the guest (WinRM / incus-agent / SSH / no-op) | `ontrak/guest.py` |

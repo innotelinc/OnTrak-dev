@@ -105,8 +105,6 @@ portal:
   port: 8080
   secret: ""                     # signs portal session cookies
   title: OnTrak
-  admin_user: instructor
-  admin_password: ""
   brand_note: "IT support training range — powered by Innotel OnTrak"
   allow_self_reset: true
   hints_require_attempt: true    # a failed check is needed before hints unlock

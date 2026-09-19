@@ -225,21 +225,29 @@ Run `bash scripts/secrets.sh` by hand to create `.env` *before* the first run �
 useful when you want to set the storage driver first, or to see the generated
 instructor password without reading it back out of the file.
 
+Sign-in has no default either. The portal is SSO-only against Cerulean's
+Authentik, so a stack that has never been pointed at it comes up with a login
+page that says so rather than one offering a password. The way out is to register
+this range's application in Cerulean and set the four `ONTRAK_PORTAL__OIDC_*`
+values — see [operations.md](operations.md#sign-in). There is no local account to
+fall back to.
+
 ## Operating it
 
 ```bash
 make exec ARGS="user list"                      # the CLI, inside the running portal
-make exec ARGS="user import roster.csv --default-password 'ChangeMe!23'"
 make exec ARGS="pool status"
 make exec ARGS="catalog groups"
 make exec ARGS="session list --state in_use"
 docker compose exec portal python3 -m ontrak scenario validate   # same thing
 ```
 
-The instructor account is seeded from `ONTRAK_PORTAL__ADMIN_PASSWORD` on boot,
-so the admin panel is reachable the first time you `make up`. Change that
-password by setting it in `.env` and restarting, or with
-`make exec ARGS="user add --username you --role instructor --password '…'"`.
+There is no instructor account seeded on boot and no password to change: sign-in
+belongs to Authentik and the portal keeps no credential — see
+[operations.md](operations.md#sign-in). An account appears the first time its
+owner signs in, and its role comes from the Authentik instructor group.
+`make demo-serve` is the one case with a door of its own, because a demo has no
+IdP to sign in against.
 
 Templates and the warm pool still need a host that can build them
 (`infra/build-templates.sh`, `make templates`). Start a class with

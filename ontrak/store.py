@@ -7,7 +7,6 @@ free of session/threading subtleties.
 
 from __future__ import annotations
 
-import csv
 import json
 import sqlite3
 from collections.abc import Iterator, Sequence
@@ -15,7 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .auth import hash_password, verify_password
+from .auth import ACCOUNT_SENTINEL
 from .models import ScoreReport, Session, SessionState, iso
 from .tickets import TicketGrade
 
@@ -166,9 +165,15 @@ class Store:
     # ------------------------------------------------------------------
     # users
     # ------------------------------------------------------------------
-    def upsert_user(
-        self, username: str, password: str, role: str = "student", display_name: str = ""
-    ) -> None:
+    def upsert_user(self, username: str, role: str = "student", display_name: str = "") -> None:
+        """Create an account row, or refresh the one that exists.
+
+        There is no password: OnTrak is SSO-only, so every row — this one and the
+        one a sign-in writes — carries `auth.ACCOUNT_SENTINEL` and nothing verifies a
+        credential against it. This is for the accounts a range seeds itself (the
+        demo roster), not for real identities: those arrive through Authentik and
+        are created by `upsert_sso_user` on first sign-in.
+        """
         username = username.strip().lower()
         with self.connect() as conn:
             conn.execute(
@@ -181,7 +186,31 @@ class Store:
                     display_name=excluded.display_name,
                     active=1
                 """,
-                (username, display_name or username, role, hash_password(password), iso()),
+                (username, display_name or username, role, ACCOUNT_SENTINEL, iso()),
+            )
+
+    def upsert_sso_user(
+        self, username: str, display_name: str = "", role: str = "student"
+    ) -> None:
+        """Create the row an Authentik sign-in needs, or refresh the one it has.
+
+        `active` is deliberately NOT touched on an existing row: deactivating an
+        account here is the range's own control — an instructor taking a student
+        off the board — and an SSO sign-in must not quietly undo it. The password
+        column gets `auth.ACCOUNT_SENTINEL`, the same sentinel every row carries, so
+        nothing here can ever verify as a credential.
+        """
+        username = username.strip().lower()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO users (username, display_name, role, password_hash, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(username) DO UPDATE SET
+                    role=excluded.role,
+                    display_name=excluded.display_name
+                """,
+                (username, display_name or username, role, ACCOUNT_SENTINEL, iso()),
             )
 
     def get_user(self, username: str) -> sqlite3.Row | None:
@@ -200,12 +229,6 @@ class Store:
                 )
             return list(conn.execute("SELECT * FROM users WHERE active = 1 ORDER BY username"))
 
-    def authenticate(self, username: str, password: str) -> sqlite3.Row | None:
-        user = self.get_user(username)
-        if user and verify_password(password, user["password_hash"]):
-            return user
-        return None
-
     def deactivate_user(self, username: str) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -219,11 +242,13 @@ class Store:
             )
 
     def delete_user(self, username: str) -> None:
-        """Remove an account outright.
+        """Remove an account row outright.
 
         Offboarding a *portal* account is not the same as offboarding a person:
         their results and tickets are kept, because a marking record that the
-        instructor can delete is not a marking record. Only the login goes.
+        instructor can delete is not a marking record. Only the row here goes —
+        and because identity is Authentik's, the person can still sign in, which
+        creates a fresh row. Revoke the person in Authentik, not here.
         """
         with self.connect() as conn:
             conn.execute("DELETE FROM users WHERE username = ?", (username.strip().lower(),))
@@ -241,13 +266,6 @@ class Store:
                 "UPDATE users SET role = ? WHERE username = ?", (role, username.strip().lower())
             )
 
-    def set_user_password(self, username: str, password: str) -> None:
-        with self.connect() as conn:
-            conn.execute(
-                "UPDATE users SET password_hash = ? WHERE username = ?",
-                (hash_password(password), username.strip().lower()),
-            )
-
     def count_users(self) -> dict[str, int]:
         with self.connect() as conn:
             rows = conn.execute(
@@ -260,32 +278,6 @@ class Store:
             elif row["role"] in out:
                 out[row["role"]] += int(row["n"])
         return out
-
-    def import_roster(
-        self, csv_path: str | Path, default_password: str | None = None
-    ) -> tuple[int, int]:
-        """Import ``username[,password][,display_name]`` rows.
-
-        Rows without a password get ``default_password`` (or their username when
-        that is not supplied). Returns ``(created, updated)``.
-        """
-        created = updated = 0
-        with open(csv_path, newline="", encoding="utf-8-sig") as fh:
-            for row in csv.DictReader(fh):
-                # tolerate "username" / "user" / first column style headers
-                keys = {k.strip().lower(): (v or "") for k, v in row.items() if k}
-                username = (
-                    keys.get("username") or keys.get("user") or keys.get("login") or ""
-                ).strip()
-                if not username:
-                    continue
-                password = (keys.get("password") or default_password or username).strip()
-                display = keys.get("display_name") or keys.get("name") or username
-                existed = self.get_user(username) is not None
-                self.upsert_user(username, password, "student", display)
-                created += 0 if existed else 1
-                updated += 1 if existed else 0
-        return created, updated
 
     # ------------------------------------------------------------------
     # sessions

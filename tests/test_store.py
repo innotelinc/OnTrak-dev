@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ontrak.auth import ACCOUNT_SENTINEL
 from ontrak.models import CheckOutcome, ScoreReport, Session, SessionState
 from ontrak.store import Store
 
@@ -87,45 +88,42 @@ def test_meta_round_trip(store):
     assert store.get_meta("schema") == 3
 
 
-def test_authentication_and_roles(store):
-    store.upsert_user("alice", "hunter2", "student", "Alice A")
-    store.upsert_user("teacher", "hunter3", "instructor", "Teacher T")
+def test_accounts_carry_no_credential(store):
+    store.upsert_user("alice", "student", "Alice A")
+    store.upsert_user("teacher", "instructor", "Teacher T")
 
-    assert store.authenticate("ALICE", "hunter2")["role"] == "student"
-    assert store.authenticate("alice", "wrong") is None
-    assert store.authenticate("nobody", "hunter2") is None
+    alice = store.get_user("alice")
+    assert alice["role"] == "student"
+    # Every row carries the same sentinel, which is not a hash of anything — there
+    # is no password path left for it to satisfy.
+    assert alice["password_hash"] == ACCOUNT_SENTINEL
+    assert store.get_user("nobody") is None
     assert [u["username"] for u in store.list_users("instructor")] == ["teacher"]
 
     store.deactivate_user("alice")
     assert store.get_user("alice") is None
-    assert store.authenticate("alice", "hunter2") is None
 
 
-def test_upsert_user_resets_password_and_role(store):
-    store.upsert_user("alice", "one", "student")
-    store.upsert_user("alice", "two", "instructor")
-    user = store.get_user("alice")
-    assert user["role"] == "instructor"
-    assert store.authenticate("alice", "two") is not None
-    assert store.authenticate("alice", "one") is None
+def test_upsert_user_refreshes_role_and_re_enables(store):
+    store.upsert_user("alice", "student")
+    store.deactivate_user("alice")
+    assert store.get_user("alice") is None
+
+    store.upsert_user("alice", "instructor", "Alice A")
+    alice = store.get_user("alice")
+    assert alice["role"] == "instructor"
+    assert alice["display_name"] == "Alice A"
+    assert alice["password_hash"] == ACCOUNT_SENTINEL
 
 
-def test_roster_import(tmp_path, store):
-    roster = tmp_path / "roster.csv"
-    roster.write_text(
-        "username,password,display_name\n"
-        "alice,alicepw,Alice A\n"
-        "bob,,Bob B\n"          # blank password -> default
-        "carol\n"               # only a username -> default
-    )
-    created, updated = store.import_roster(roster, default_password="classpass")
-    assert (created, updated) == (3, 0)
-    assert store.authenticate("alice", "alicepw") is not None
-    assert store.authenticate("bob", "classpass") is not None
-    assert store.authenticate("carol", "classpass") is not None
+def test_an_sso_sign_in_does_not_undo_a_disable(store):
+    """Authentik says who exists; the range still decides who may come in."""
+    store.upsert_user("alice", "student", "Alice A")
+    store.deactivate_user("alice")
 
-    created, updated = store.import_roster(roster, default_password="classpass")
-    assert (created, updated) == (0, 3)
+    store.upsert_sso_user("alice", display_name="Alice A", role="student")
+    assert store.get_user("alice") is None
+    assert store.get_user("ALICE") is None
 
 
 def test_store_survives_reopen(tmp_path):

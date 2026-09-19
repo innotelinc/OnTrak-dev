@@ -215,14 +215,16 @@ def register_admin_routes(app: FastAPI, ctx: AdminContext) -> None:
             {"accounts": store.list_all_users(), "counts": store.count_users()},
         )
 
+    # There is no create and no password reset: identity is Authentik's. An
+    # account appears here the first time its owner signs in, and its role is
+    # Authentik's group membership re-read on every sign-in — so the controls
+    # that matter locally are enabling, disabling and deleting, not credentials.
     @app.post("/admin/users")
     def admin_users_action(
         request: Request,
         action: str = Form(...),
         username: str = Form(""),
-        password: str = Form(""),
         role: str = Form("student"),
-        display_name: str = Form(""),
         csrf: str = Form(""),
         user=Depends(require_instructor),  # noqa: B008
     ):
@@ -235,23 +237,9 @@ def register_admin_routes(app: FastAPI, ctx: AdminContext) -> None:
         if user["username"] == username and action in {"deactivate", "delete"}:
             return ctx.redirect("/admin/users", request, "You cannot disable your own account.")
         try:
-            if action == "create":
-                if len(password) < 4:
-                    return ctx.redirect(
-                        "/admin/users", request, "Give the account a password of at least 4 characters."
-                    )
-                store.upsert_user(username, password, role=role or "student", display_name=display_name)
-                message = f"Created {username} as {role or 'student'}."
-            elif action == "role":
+            if action == "role":
                 store.set_user_role(username, role)
                 message = f"{username} is now {role}."
-            elif action == "password":
-                if len(password) < 4:
-                    return ctx.redirect(
-                        "/admin/users", request, "Give the account a password of at least 4 characters."
-                    )
-                store.set_user_password(username, password)
-                message = f"Password reset for {username}."
             elif action == "deactivate":
                 store.deactivate_user(username)
                 message = f"{username} can no longer sign in."

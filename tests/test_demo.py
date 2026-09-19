@@ -9,8 +9,8 @@ import pytest
 from ontrak import selection
 from ontrak.demo import (
     DEMO_INSTRUCTOR,
-    DEMO_PASSWORD,
     DemoDriver,
+    account_names,
     build_demo_environment,
     run_demo,
     seed_accounts,
@@ -42,8 +42,11 @@ def test_seed_accounts_is_idempotent(env):
     first = seed_accounts(env)
     second = seed_accounts(env)
     assert first == second
-    assert env.store.authenticate(first[0], DEMO_PASSWORD) is not None
-    assert env.store.authenticate(DEMO_INSTRUCTOR, DEMO_PASSWORD)["role"] == "instructor"
+    # Rows with no credential: the demo door picks an account by name, and it
+    # offers exactly the accounts that seeding creates.
+    assert env.store.get_user(first[0])["role"] == "student"
+    assert env.store.get_user(DEMO_INSTRUCTOR)["role"] == "instructor"
+    assert set(account_names(env.settings)) == {*first, DEMO_INSTRUCTOR}
 
 
 def test_driver_reports_every_objective_the_scenario_declares(env):

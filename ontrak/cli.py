@@ -10,7 +10,7 @@ Everything an instructor or operator needs, without touching Python:
     ontrak session start|check|reset|console|end
     ontrak ticket form|show|grade|complete # the in-house write-up
     ontrak reap --loop                    # pool refill + idle/expiry reaping
-    ontrak user seed-admin|add|import
+    ontrak user list|remove
     ontrak serve                          # the student portal, including /admin
 """
 
@@ -551,36 +551,25 @@ def cmd_stats(args) -> int:
 # users
 # ---------------------------------------------------------------------------
 def cmd_user(args) -> int:
+    """List the local account rows, or disable one.
+
+    There is nothing to add or import here: identity is Authentik's, and a row is
+    created the first time someone signs in (``Store.upsert_sso_user``). A
+    username that has never signed in simply has no row, so an operator manages
+    *people* in Authentik and *access* here.
+    """
     ctx = Context(args.config)
     store = ctx.store
-    if args.action == "seed-admin":
-        password = ctx.settings.portal.admin_password
-        generated = False
-        if not password:
-            import secrets
-
-            password = secrets.token_urlsafe(12)
-            generated = True
-        store.upsert_user(ctx.settings.portal.admin_user, password, role="instructor", display_name="Instructor")
-        _say(OK, f"instructor account {ctx.settings.portal.admin_user!r} ready")
-        if generated:
-            _say(WARN, f"generated password (store it now, it is not shown again): {password}")
-        return 0
-    if args.action == "add":
-        store.upsert_user(args.username, args.password, role=args.role, display_name=args.display_name or args.username)
-        _say(OK, f"{args.role} {args.username!r} added/updated")
-        return 0
     if args.action == "list":
         rows = [[u["username"], u["role"], u["display_name"], u["created_at"]] for u in store.list_users()]
         _table(["username", "role", "name", "created"], rows)
         return 0
-    if args.action == "import":
-        created, updated = store.import_roster(args.csv, default_password=args.default_password)
-        _say(OK, f"roster imported: {created} created, {updated} updated")
-        return 0
     if args.action == "remove":
+        if not args.username:
+            _say(FAIL, "--username is required")
+            return 2
         store.deactivate_user(args.username)
-        _say(OK, f"{args.username!r} deactivated")
+        _say(OK, f"{args.username!r} disabled — an Authentik sign-in will not re-enable them")
         return 0
     return 2
 
@@ -925,6 +914,10 @@ def cmd_generate(args) -> int:
 def cmd_demo(args) -> int:
     if args.action == "serve":
         os.environ["ONTRAK_DEMO__ENABLED"] = "true"
+        # A demo has no IdP to sign in against and seeds its own roster
+        # (demo.seed_accounts). The portal opens a demo-only door for exactly this
+        # case — pick a demo account, no password (see ontrak/portal/app.py) — so
+        # demo mode still works without opening any kind of credential path.
         args.log_level = getattr(args, "log_level", "info")
         return cmd_serve(args)
     run_demo(
@@ -1225,13 +1218,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("stats", help="print a JSON status snapshot").set_defaults(func=cmd_stats)
 
     user = sub.add_parser("user", help="manage portal accounts")
-    user.add_argument("action", choices=["seed-admin", "add", "list", "import", "remove"])
+    user.add_argument("action", choices=["list", "remove"])
     user.add_argument("--username")
-    user.add_argument("--password")
-    user.add_argument("--display-name")
-    user.add_argument("--role", default="student", choices=["student", "instructor"])
-    user.add_argument("--csv")
-    user.add_argument("--default-password")
     user.set_defaults(func=cmd_user)
 
     catalog = sub.add_parser("catalog", help="the OS/Office workload catalog")

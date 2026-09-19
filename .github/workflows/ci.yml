@@ -102,6 +102,13 @@ jobs:
       - name: Tests
         run: pytest -q
 
+      # The identity path, on its own line. Sign-in is Authentik's and only
+      # Authentik's, so a regression here is a range nobody can get into. The
+      # fake IdP in tests/test_oidc.py drives discovery, the code exchange and
+      # userinfo; this fails loudly if that stops holding.
+      - name: Authentik sign-in flow
+        run: pytest -q tests/test_oidc.py
+
       # The repository's own tooling has tests too — the secret scanner and the
       # Cerulean provisioner. They are what runs unattended against the estate, so
       # they are held to the same bar as the platform.
@@ -249,21 +256,57 @@ jobs:
           # demo mode is the one path every host can always run.
           docker run --rm ontrak:ci demo run --students 3
 
-      - name: The portal boots and answers
+      - name: The portal boots and offers Authentik only
         run: |
           set -euo pipefail
+          # A representative range: pointed at Authentik. The issuer is
+          # deliberately unreachable — this checks the *posture* the portal
+          # presents, not the IdP, and a login page that offered a password form
+          # would be the regression. The flow itself is driven against the fake
+          # IdP in tests/test_oidc.py.
           docker run -d --name ontrak-ci -p 18080:8080 \
             -e ONTRAK_PORTAL__SECRET=ci-only-secret \
-            -e ONTRAK_PORTAL__ADMIN_PASSWORD=ci-only-admin \
             -e ONTRAK_GUAC__SECRET_KEY="$(openssl rand -hex 16)" \
-            -e ONTRAK_DEMO__ENABLED=true \
+            -e ONTRAK_PORTAL__OIDC_ISSUER=https://auth.example.invalid/application/o/ontrak/ \
+            -e ONTRAK_PORTAL__OIDC_CLIENT_ID=ontrak \
+            -e ONTRAK_PORTAL__OIDC_CLIENT_SECRET=ci-only-oidc-secret \
+            -e ONTRAK_PORTAL__OIDC_REDIRECT_URI=http://127.0.0.1:18080/oidc/callback \
             ontrak:ci
           for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1; then break; fi
             sleep 2
           done
           curl -fsS http://127.0.0.1:18080/healthz
-          curl -fsS -o /dev/null -w 'login page: %{http_code}\n' http://127.0.0.1:18080/login
+
+          login="$(curl -fsS http://127.0.0.1:18080/login)"
+          grep -q 'Sign in with Authentik' <<<"$login" \
+            || { echo '::error::the login page does not offer Authentik'; exit 1; }
+          if grep -q 'name="password"' <<<"$login"; then
+            echo '::error::the login page renders a password form; the local login is gone'
+            exit 1
+          fi
+          echo 'login page: Authentik offered, no password form'
+
+          # The route is gone, not merely refused.
+          code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            --data 'username=alice&password=alice-pw' \
+            http://127.0.0.1:18080/login)"
+          [ "$code" = "405" ] \
+            || { echo "::error::POST /login answered $code, expected 405 (no password route)"; exit 1; }
+          echo 'POST /login: 405 (no password route)'
+
+          # The demo door exists for `ontrak demo serve` only; a real range 404s it.
+          code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/demo/login/student1)"
+          [ "$code" = "404" ] \
+            || { echo "::error::the demo sign-in answered $code on a non-demo range, expected 404"; exit 1; }
+          echo 'demo door: 404 (closed on a real range)'
+
+          # Starting the flow with an unreachable IdP is reported, not a 500.
+          code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/oidc/login)"
+          [ "$code" = "303" ] \
+            || { echo "::error::/oidc/login answered $code, expected a 303 back to /login"; exit 1; }
+          echo 'oidc start: 303 back to /login when the IdP is unreachable'
+
           echo '--- container log ---'
           docker logs ontrak-ci 2>&1 | tail -20
 

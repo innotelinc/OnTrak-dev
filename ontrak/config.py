@@ -261,11 +261,28 @@ class PortalConfig:
     port: int = 8080
     secret: str = ""
     title: str = "OnTrak"
-    admin_user: str = "instructor"
-    admin_password: str = ""
     brand_note: str = "IT support training range — powered by Innotel OnTrak"
     allow_self_reset: bool = True
     hints_require_attempt: bool = True
+
+    # ── Cerulean / Authentik SSO (docs/operations.md "Sign-in") ──
+    # OnTrak is a relying party, not an identity provider: an instructor and a
+    # student are Authentik accounts, and the portal only decides what a signed-in
+    # account may do. All four below must be set for SSO to be enabled — an empty
+    # one makes the flow fail closed rather than half-work.
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    # Comma-separated. The range answers on three names (see
+    # scripts/cerulean-provision.py), so the callback follows the origin the
+    # sign-in started on — and every listed URL must be registered on the
+    # Authentik provider too, or that origin cannot sign in at all.
+    oidc_redirect_uri: str = ""
+    # Authentik group whose members are instructors. Empty promotes nobody.
+    oidc_instructor_group: str = ""
+    # Authentik group that must be present to sign in at all. Empty admits any
+    # account that Authentik authenticates.
+    oidc_required_group: str = ""
 
 
 @dataclass

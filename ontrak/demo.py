@@ -28,7 +28,6 @@ from .sessions import SessionManager
 from .store import Store
 
 DEMO_STUDENTS = ["student1", "student2", "student3", "student4", "student5", "student6"]
-DEMO_PASSWORD = "demo"
 DEMO_INSTRUCTOR = "instructor"
 
 
@@ -221,15 +220,28 @@ def build_demo_environment(
     )
 
 
+def account_names(settings: Settings) -> list[str]:
+    """The demo accounts a sign-in may choose from: the students, then the instructor.
+
+    Shared by `seed_accounts` (which creates them) and the portal's demo door
+    (which lets you in as one), so the two can never disagree about who exists.
+    """
+    count = max(1, min(int(settings.demo.students), len(DEMO_STUDENTS)))
+    return [*DEMO_STUDENTS[:count], DEMO_INSTRUCTOR]
+
+
 def seed_accounts(env: DemoEnvironment, *, students: int | None = None) -> list[str]:
-    """Create the demo roster. Idempotent: re-running just re-hashes the passwords."""
+    """Create the demo roster. Idempotent: re-running just refreshes the rows.
+
+    There is no password to set — sign-in is Authentik's everywhere, and a demo
+    has no IdP to sign in against, so the portal's demo door (see app.py) picks
+    one of these accounts by name instead.
+    """
     count = int(students if students is not None else env.settings.demo.students)
     names = DEMO_STUDENTS[: max(1, min(count, len(DEMO_STUDENTS)))]
     for name in names:
-        env.store.upsert_user(name, DEMO_PASSWORD, role="student", display_name=name.title())
-    env.store.upsert_user(
-        DEMO_INSTRUCTOR, DEMO_PASSWORD, role="instructor", display_name="Instructor"
-    )
+        env.store.upsert_user(name, role="student", display_name=name.title())
+    env.store.upsert_user(DEMO_INSTRUCTOR, role="instructor", display_name="Instructor")
     return names
 
 

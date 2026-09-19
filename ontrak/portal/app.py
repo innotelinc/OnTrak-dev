@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .. import auth, demo, guac, selection
+from .. import auth, demo, guac, oidc, selection
 from ..catalog import Catalog
 from ..config import Settings, load_settings
 from ..guest import build_driver
@@ -275,22 +275,20 @@ def create_app(
         )
 
     # ------------------------------------------------------------------ auth --
-    @app.get("/login", response_class=HTMLResponse)
-    def login_form(request: Request):
-        return render(request, "login.html", {"error": ""})
+    # Sign-in is Authentik's and only Authentik's (docs/operations.md
+    # "Sign-in"). The portal issues a session for an account the IdP has just
+    # vouched for, and keeps no credential of its own — there is no password form
+    # to fall back to. The one exception is demo mode, which has no IdP to sign
+    # in against and so gets a door of its own below.
+    def issue_session(request: Request, user, message: str = ""):
+        """Issue the portal session cookie for a user row. The one place that
+        does it, so the OIDC callback and the demo door cannot drift apart.
 
-    @app.post("/login")
-    def login_submit(
-        request: Request,
-        username: str = Form(...),
-        password: str = Form(...),
-        csrf: str = Form(""),
-    ):
-        _check_csrf(request, csrf)
-        user = request.app.state.store.authenticate(username, password)
-        if user is None:
-            return render(request, "login.html", {"error": "Unknown username or wrong password."}, status_code=401)
-        response = redirect("/dashboard", request, f"Signed in as {user['username']}.")
+        Not named ``start_session``: that is the ``/sessions/start`` handler
+        defined further down this factory, and a helper of the same name is
+        silently shadowed by it.
+        """
+        response = redirect("/dashboard", request, message or f"Signed in as {user['username']}.")
         response.set_cookie(
             auth.COOKIE_NAME,
             auth.sign_cookie(
@@ -302,6 +300,110 @@ def create_app(
             samesite="lax",
         )
         request.app.state.store.log_event("login", user["username"])
+        return response
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login_form(request: Request):
+        return render(
+            request,
+            "login.html",
+            {
+                "sso": oidc.public_config(settings.portal),
+                "demo_accounts": demo.account_names(settings) if settings.demo.enabled else [],
+            },
+        )
+
+    # ------------------------------------------------------------------- demo --
+    # Demo mode has no IdP to sign in against — that is the point of it — so it
+    # gets a door of its own: a pick-an-account link, no password. It is mounted
+    # only while `demo.enabled` is on, so on a real range these routes 404 and the
+    # only way in is Authentik.
+    @app.get("/demo/login/{username}")
+    def demo_login(request: Request, username: str):
+        if not settings.demo.enabled:
+            raise HTTPException(status_code=404, detail="demo mode is off on this range")
+        wanted = username.strip().lower()
+        if wanted not in demo.account_names(settings):
+            return redirect("/login", request, "Pick one of the demo accounts.")
+        user = request.app.state.store.get_user(wanted)
+        if user is None:
+            return redirect("/login", request, "That demo account is missing — restart demo mode.")
+        return issue_session(request, user, f"Signed in as {user['display_name'] or wanted}.")
+
+    @app.get("/oidc/login")
+    def oidc_start(request: Request):
+        """Send the browser to Authentik."""
+        if not oidc.enabled(settings.portal):
+            return redirect("/login", request, "Single sign-on is not configured on this range.")
+        try:
+            state = oidc.new_state()
+            callback = oidc.callback_for(settings.portal, request.headers)
+            destination = oidc.authorize_url(settings.portal, state, callback)
+        except oidc.OidcError as exc:
+            return redirect("/login", request, f"Sign-in is unavailable: {exc}")
+        response = RedirectResponse(destination, status_code=303)
+        # The state is signed, and the cookie is host-only: the callback has to
+        # present it, so a flow started for one origin cannot be finished on
+        # another, and a code cannot be replayed after this expires.
+        response.set_cookie(
+            oidc.OIDC_COOKIE,
+            auth.sign_cookie(
+                {"state": state, "redirect_uri": callback},
+                settings.portal.secret,
+                ttl_seconds=oidc.STATE_TTL_SECONDS,
+            ),
+            httponly=True,
+            samesite="lax",
+        )
+        return response
+
+    @app.get("/oidc/callback")
+    def oidc_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+        """Authentik's return leg: exchange the code, then map claims to a role."""
+        store = request.app.state.store
+
+        def refuse(message: str):
+            """Deny access in the app's own idiom: no session, and a message the
+            student can read. The signed state cookie never survives a failure."""
+            response = redirect("/login", request, message)
+            response.delete_cookie(oidc.OIDC_COOKIE)
+            return response
+
+        wanted = auth.read_cookie(request.cookies.get(oidc.OIDC_COOKIE), settings.portal.secret)
+        if error:
+            return refuse(f"Authentik refused the sign-in: {error}")
+        if not wanted or not state or wanted.get("state") != state:
+            # Expired, replayed, or a callback that arrived on a different origin
+            # than the sign-in started on (the state cookie is host-only).
+            return refuse("That sign-in expired or was already used. Start again.")
+        try:
+            token = oidc.exchange_code(settings.portal, code, str(wanted.get("redirect_uri") or ""))
+            claims = oidc.userinfo(settings.portal, token)
+        except oidc.OidcError as exc:
+            return refuse(f"Sign-in failed: {exc}")
+
+        username = oidc.username_for(claims)
+        if not username:
+            return refuse(
+                "Authentik returned no email address for that account — ask your instructor to set one."
+            )
+        if not oidc.entitled(settings.portal, claims):
+            store.log_event("login-refused", username)
+            return refuse("That account is not enrolled in this range.")
+
+        # Authentik is re-read on every sign-in, so a group change takes effect on
+        # the next one with nothing to keep in step locally.
+        store.upsert_sso_user(
+            username, display_name=oidc.display_name_for(claims, username), role=oidc.role_for(claims, settings.portal)
+        )
+        user = store.get_user(username)
+        if user is None:
+            # The row exists but is deactivated: an instructor's own control wins
+            # over an SSO sign-in (see store.upsert_sso_user).
+            store.log_event("login-refused", username)
+            return refuse("That account is disabled on this range. Ask your instructor.")
+        response = issue_session(request, user, f"Signed in as {user['display_name'] or user['username']}.")
+        response.delete_cookie(oidc.OIDC_COOKIE)
         return response
 
     @app.post("/logout")

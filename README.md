@@ -44,7 +44,7 @@
 - **A workload catalog** — manifests for Windows desktop, Windows Server, Microsoft Office and Linux: media source, device profile, resources, automation capability and provisioning plan. Manifests, never binaries.
 - **A scenario engine** — six hand-written scenarios and a fault-primitive library that generates more, each with a ticket, weighted objectives, progressive hints, a fault-injecting `setup.ps1` and a live-state `check.ps1`.
 - **A session lifecycle** — request → clone → boot → hand over → grade → submit → destroy, with per-session time limits, progressive hints, reset-on-demand and a reset that is always a fresh clone.
-- **A student portal** — FastAPI app with login, ticket dashboard, HTML5 console via the gateway, time-limit control, `Complete & End`, and results-only reporting.
+- **A student portal** — FastAPI app with Authentik SSO sign-in (no local password), ticket dashboard, HTML5 console via the gateway, time-limit control, `Complete & End`, and results-only reporting.
 - **A container stack** — `docker compose up` brings up the portal and the Guacamole console gateway; the training machines stay Incus VMs on the host, reached over its socket or a cluster endpoint.
 - **An operator surface** — CLI (`doctor`, `catalog`, `media`, `image`, `template`, `pool`, `schedule`, `session`, `generate`, `demo`), warm-pool management, scheduled prewarm/teardown, and an instructor view with CSV export.
 - **Demo mode** — the whole student flow against an in-memory hypervisor: no Incus, no Windows, no secrets, in about five seconds.
@@ -147,9 +147,11 @@ OnTrak/
   console gateway both report healthy, a whole class runs inside the image (`make docker-demo`),
   and the admin panel serves every page with no Incus socket at all.
 - **Verified as a first run:** from a checkout with no `.env` and no hypervisor, one
-  `docker compose up -d --build` writes the secrets, brings both services up healthy, signs in
-  to the admin panel with the generated instructor password, and gets a portal-signed console
-  payload accepted by the live gateway as a machine the student can open.
+  `docker compose up -d --build` writes the secrets, brings both services up healthy, and gets
+  a portal-signed console payload accepted by the live gateway as a machine the student can
+  open. Reaching the admin panel in that run needs a way in, and sign-in is Authentik's and
+  only Authentik's: point the range at Cerulean (see
+  [docs/operations.md](docs/operations.md#sign-in)).
 - **Verified for the host half:** `infra/bootstrap-host.sh` — the same script `lab-setup`
   runs in the host's namespaces — was run twice against a real Incus daemon (upstream
   packages, storage pool, lab bridge, project, limits profile), and the second run changed

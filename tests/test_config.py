@@ -56,7 +56,7 @@ def test_the_shipped_env_template_is_loadable():
     # Values may legitimately be blank (the secrets are filled in by the first
     # run), but every key must be one the app can read.
     listed = dict(re.findall(r"^([A-Z][A-Z0-9_]*)=(.*)$", template.read_text(), re.MULTILINE))
-    for secret in ("ONTRAK_GUAC__SECRET_KEY", "ONTRAK_PORTAL__SECRET", "ONTRAK_PORTAL__ADMIN_PASSWORD"):
+    for secret in ("ONTRAK_GUAC__SECRET_KEY", "ONTRAK_PORTAL__SECRET"):
         assert secret in listed, f"the template stopped listing {secret}"
 
     filled = {key: value for key, value in listed.items() if value.strip()}

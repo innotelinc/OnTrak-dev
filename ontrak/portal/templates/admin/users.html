@@ -4,9 +4,10 @@
 <h1>Accounts</h1>
 <p class="muted">
   {{ counts.student }} student(s), {{ counts.instructor }} instructor(s),
-  {{ counts.inactive }} disabled. Deleting an account removes the login only — the
-  results and tickets stay, because a marking record the instructor can erase is not
-  a marking record.
+  {{ counts.inactive }} disabled. Identity is Authentik's: an account appears here the first
+  time its owner signs in, and disabling one keeps them out even through SSO. Deleting an
+  account removes the local row only — the results and tickets stay, because a marking record
+  the instructor can erase is not a marking record, and the person can sign straight back in.
 </p>
 {% include "admin/_nav.html" %}
 
@@ -40,13 +41,6 @@
                   <button type="submit" class="link">make student</button>
                 {% endif %}
               </form>
-              <form method="post" action="/admin/users" class="inline">
-                <input type="hidden" name="csrf" value="{{ csrf }}">
-                <input type="hidden" name="username" value="{{ account['username'] }}">
-                <input type="hidden" name="action" value="password">
-                <input type="password" name="password" placeholder="new password" size="10" required>
-                <button type="submit" class="link">reset</button>
-              </form>
               {% if account["active"] %}
                 <form method="post" action="/admin/users" class="inline">
                   <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -78,29 +72,18 @@
 
   <div class="col-side">
     <div class="card">
-      <h2>Create or update an account</h2>
-      <form method="post" action="/admin/users">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input type="hidden" name="action" value="create">
-        <label>Username <input name="username" required placeholder="aisha.khan"></label>
-        <label>Display name <input name="display_name" placeholder="Aisha Khan"></label>
-        <label>Password <input name="password" required></label>
-        <label>Role
-          <select name="role">
-            <option value="student">student</option>
-            <option value="instructor">instructor</option>
-          </select>
-        </label>
-        <button type="submit">Create account</button>
-        <p class="muted small">Creating an existing username resets it and re-enables it.</p>
-      </form>
-    </div>
-
-    <div class="card">
-      <h2>Bulk import</h2>
+      <h2>Accounts come from Authentik</h2>
       <p class="muted small">
-        A class list is faster from the command line:
-        <code>ontrak user import --csv roster.csv --default-password ChangeMe123</code>.
+        OnTrak keeps no password and no user directory. An account is created here the first
+        time someone signs in through the range's Authentik application, keyed on their email
+        address. Membership of the instructor group is what makes someone an instructor, and
+        it is re-read on every sign-in — changing a role below only sticks until that person
+        signs in again.
+      </p>
+      <p class="muted small">
+        To take someone off the board, <strong>disable</strong> them here: a disabled account
+        stays disabled even when they sign in through SSO. Create, rename and offboard people
+        in Authentik.
       </p>
     </div>
   </div>
