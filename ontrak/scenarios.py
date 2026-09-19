@@ -152,6 +152,27 @@ class Scenario:
     def hints_up_to(self, level: int) -> list[str]:
         return self.hints[: max(0, min(level, len(self.hints)))]
 
+    @property
+    def ticket_header(self) -> dict[str, str]:
+        """The ticket's own header — who reported it, on what, how urgent.
+
+        ``ticket:`` also carries ``form:``, the field list with its weights, hints
+        and the terms a competent answer has to contain. The session page used to
+        render the whole block as a key/value table, which printed that rubric
+        beside the student — the answers, in the page they were meant to answer
+        from. Only scalars survive here and ``form`` is excluded by name, so a
+        new key in the block cannot leak by default: an entry has to be a plain
+        label/value to reach the page at all.
+        """
+        header: dict[str, str] = {}
+        for key, value in (self.ticket or {}).items():
+            if key == "form" or not isinstance(value, (str, int, float)):
+                continue
+            text = str(value).strip()
+            if text:
+                header[key.replace("_", " ").title()] = text
+        return header
+
     def public(self, hint_level: int = 0) -> dict:
         """Portal-facing view. Never includes script bodies or unrevealed hints."""
         return {
@@ -162,7 +183,9 @@ class Scenario:
             "difficulty": self.difficulty,
             "minutes": self.minutes,
             "briefing": self.briefing,
-            "ticket": self.ticket,
+            # The header, never the raw block: ``ticket`` holds the marking rubric
+            # (see ticket_header) and a view that leaked it would leak the answers.
+            "ticket": self.ticket_header,
             "tags": self.tags,
             "pass_score": self.pass_score,
             "requires_internet": self.requires_internet,

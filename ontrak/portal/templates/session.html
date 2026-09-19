@@ -62,6 +62,16 @@
         </p>
       {% elif console_url %}
         <p class="muted">The console appears once the machine is ready.</p>
+      {% elif scenario.is_linux %}
+        {# No remote desktop to embed: the guest is a Linux container, which runs no
+           RDP server — an iframe here used to report "the remote desktop server is
+           currently unreachable", which reads like a fault in the lab rather than a
+           console that does not apply. Say what this scenario actually is. #}
+        <p class="muted">
+          This scenario runs on a Linux machine, so there is no remote desktop to open here.
+          Work in a shell on the machine itself, as the briefing describes; your instructor can
+          give you the address for it.
+        </p>
       {% else %}
         <p class="muted">
           No browser console is configured (the instructor needs to set guac.base_url and
@@ -74,9 +84,12 @@
   <div class="col-side">
     <div class="card">
       <h2>Ticket</h2>
-      {% if scenario.ticket %}
+      {# The header only. The block also holds `form` — the rubric the write-up is
+         marked against — and rendering it here would hand the student the
+         answers (see Scenario.ticket_header). #}
+      {% if scenario.ticket_header %}
         <table class="kv">
-          {% for k, v in scenario.ticket.items() %}<tr><th>{{ k }}</th><td>{{ v }}</td></tr>{% endfor %}
+          {% for k, v in scenario.ticket_header.items() %}<tr><th>{{ k }}</th><td>{{ v }}</td></tr>{% endfor %}
         </table>
       {% endif %}
       <div class="briefing">{{ scenario.briefing }}</div>

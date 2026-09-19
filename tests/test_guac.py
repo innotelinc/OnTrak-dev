@@ -182,3 +182,57 @@ def test_live_guacamole_accepts_the_payload(settings):  # pragma: no cover - nee
     body = urllib.parse.urlencode({"data": data}).encode()
     with urllib.request.urlopen(url.rstrip("/") + "/api/tokens", data=body, timeout=10) as response:
         assert response.status == 200
+
+
+class _Scenario:
+    """The fields the protocol decision reads."""
+
+    def __init__(self, platform: str, scenario_id: str = "s") -> None:
+        self.platform = platform
+        self.id = scenario_id
+        self.title = f"{platform} scenario"
+
+    @property
+    def is_linux(self) -> bool:
+        return self.platform == "linux"
+
+
+def test_a_windows_guest_gets_rdp(settings):
+    scenario = _Scenario("windows")
+    assert guac.protocol_for(settings, scenario) == "rdp"
+    payload = guac.build_payload(settings, make_session(), scenario)
+    connection = next(iter(payload["connections"].values()))
+    assert connection["protocol"] == "rdp"
+    assert connection["parameters"]["port"] == str(settings.guest.rdp_port)
+
+
+def test_a_linux_container_gets_no_browser_console_by_default(settings):
+    # The reported failure: the console iframe was an RDP session pointed at a
+    # Linux container, which has no RDP server, so every container scenario showed
+    # "the remote desktop server is currently unreachable". With no sshd in the
+    # image either (the default Incus-agent driver), the honest answer is no
+    # console at all — the portal says so instead of embedding one that cannot
+    # connect.
+    scenario = _Scenario("linux")
+    assert guac.protocol_for(settings, scenario) == ""
+    with pytest.raises(guac.GuacError, match="no remote desktop"):
+        guac.build_payload(settings, make_session(), scenario)
+
+
+def test_a_linux_guest_gets_ssh_when_the_image_runs_sshd(settings):
+    settings.guac.linux_ssh = True
+    scenario = _Scenario("linux")
+    assert guac.protocol_for(settings, scenario) == "ssh"
+    payload = guac.build_payload(settings, make_session(rdp_user="", rdp_password=""), scenario)
+    connection = next(iter(payload["connections"].values()))
+    assert connection["protocol"] == "ssh"
+    assert connection["parameters"]["port"] == str(settings.guest.ssh_port)
+    assert connection["parameters"]["username"] == settings.guest.linux_user
+    # An SSH console has no desktop to resize; asking for one would be noise.
+    assert "resize-method" not in connection["parameters"]
+
+
+def test_an_unknown_scenario_still_gets_rdp(settings):
+    # No scenario means the payload cannot be classified; RDP is the pre-existing
+    # behaviour and the safer guess (a Windows VM is what the pool holds).
+    assert guac.protocol_for(settings, None) == "rdp"

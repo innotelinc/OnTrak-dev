@@ -241,6 +241,13 @@ class GuacConfig:
     recording_path: str = "/recordings"
     server_layout: str = "en-us-qwerty"
     keyboard_layout: str = "en-us-qwerty"
+    # A Linux *container* guest has no RDP server, so an RDP console pointed at it
+    # is a page that says "the remote desktop server is currently unreachable" —
+    # which is what the console iframe used to show for every container scenario.
+    # Off by default, because these guests run `linux_driver: incus-shell` and
+    # therefore no sshd either; turn it on when the Linux images do run one, and
+    # the console becomes SSH instead of RDP.
+    linux_ssh: bool = False
 
     def secret_bytes(self) -> bytes:
         key = (self.secret_key or "").strip()

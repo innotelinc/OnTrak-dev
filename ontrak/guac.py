@@ -132,10 +132,72 @@ def rdp_parameters(settings, session: Session) -> dict:
     return params
 
 
+def ssh_parameters(settings, session: Session) -> dict:
+    """SSH parameters for one student's Linux guest.
+
+    Only used when the Linux images actually run an sshd (``guac.linux_ssh``); the
+    default container driver runs commands through the Incus agent and has no sshd
+    at all, which is why this is off by default rather than the natural choice.
+    """
+    guac = settings.guac
+    params: dict[str, str] = {
+        "hostname": session.host_ip,
+        "port": str(settings.guest.ssh_port),
+        "username": session.rdp_user or settings.guest.linux_user,
+        "password": session.rdp_password or settings.guest.password,
+        "color-depth": "32",
+        "font-size": "14",
+        "clipboard-encoding": "UTF-8",
+        "server-layout": guac.server_layout,
+        "read-only": "false",
+        "autoretry": "5",
+    }
+    if guac.recording:
+        params.update(
+            {
+                "recording-path": guac.recording_path,
+                "recording-name": (
+                    f"ontrak-{session.id}-{session.student}-{session.scenario_id}"
+                    "-${GUAC_DATE}-${GUAC_TIME}"
+                ),
+                "create-recording-path": "true",
+            }
+        )
+    return params
+
+
+def protocol_for(settings, scenario: Scenario | None) -> str:
+    """The console protocol this scenario's guest can actually answer.
+
+    A Windows VM brokers RDP. A Linux *container* does not: it runs no RDP server,
+    so an RDP console for it is a page that reports the remote desktop server as
+    unreachable, which says nothing about the scenario being broken. It answers
+    SSH instead, but only where the image runs sshd — the default container driver
+    works through the Incus agent and needs no daemon, so this returns "" (no
+    browser console) unless ``guac.linux_ssh`` says otherwise. An empty answer is
+    the honest one: the portal then explains the situation instead of embedding a
+    console that cannot connect.
+    """
+    # `getattr`, because this runs while a student's session page is being built and
+    # the caller only catches GuacError/ScenarioError: a scenario-like object that
+    # lacks the property must not turn the page into a 500, and the safe reading of
+    # "I cannot tell" is the pre-existing behaviour.
+    if scenario is not None and getattr(scenario, "is_linux", False):
+        return "ssh" if settings.guac.linux_ssh else ""
+    return "rdp"
+
+
 def build_payload(settings, session: Session, scenario: Scenario | None = None, now: float | None = None) -> dict:
     """Full Guacamole auth payload for one session."""
     if not session.host_ip:
         raise GuacError(f"session {session.id} has no host address yet")
+    protocol = protocol_for(settings, scenario)
+    if not protocol:
+        raise GuacError(
+            f"scenario {session.scenario_id} runs a Linux guest, which has no remote "
+            "desktop: set guac.linux_ssh once the image runs sshd (guac.ssh_port), "
+            "or hand the student a shell another way"
+        )
     ttl_seconds = settings.guac.link_ttl_minutes * 60
     expires_ms = int(((now if now is not None else time.time()) + ttl_seconds) * 1000)
     title = scenario.title if scenario else session.scenario_id
@@ -145,8 +207,11 @@ def build_payload(settings, session: Session, scenario: Scenario | None = None, 
         "connections": {
             f"OnTrak #{session.id} - {title}": {
                 "id": f"ontrak-session-{session.id}",
-                "protocol": "rdp",
-                "parameters": rdp_parameters(settings, session),
+                "protocol": protocol,
+                "parameters": (
+                    ssh_parameters(settings, session) if protocol == "ssh"
+                    else rdp_parameters(settings, session)
+                ),
             }
         },
     }

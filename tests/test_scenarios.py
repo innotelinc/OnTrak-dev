@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -104,3 +105,49 @@ def test_category_aliases():
 def test_by_category_groups_everything(repo):
     grouped = repo.by_category()
     assert sum(len(v) for v in grouped.values()) == len(repo.list())
+
+
+def test_the_public_view_never_carries_the_ticket_rubric(repo):
+    """The reported bug: the session page printed the form beside the student.
+
+    ``ticket:`` holds both the request's header (who reported it, on what) and
+    ``form:`` — the field list with its weights, hints and the terms a competent
+    answer must contain (`all_of: [750]`, `min_words: 6`). The page rendered the
+    block as a key/value table, so the student saw the answers in the very card
+    they were meant to answer from.
+    """
+    scenario = repo.get("linux-dir-tree-build")
+    assert scenario.ticket.get("form"), "the fixture scenario must declare a form"
+
+    public = scenario.public()
+    assert public["ticket"], "the header should still reach the page"
+    assert set(public["ticket"]) == {"From", "System", "Priority", "Channel", "Reported"}
+    assert public["ticket"]["From"] == "Dana Okafor (Platform team)"
+
+    # Structural, not a word search: "form" is a substring of "platform" in the
+    # briefing, and `weight` is a legitimate key on an objective. What must never
+    # arrive is the rubric itself — the field spec, its terms or its hints.
+    assert all(isinstance(v, str) for v in public["ticket"].values())
+    rendered = json.dumps(public["ticket"])
+    for leak in ("min_words", "all_of", "any_of", "hint", "fields", "title"):
+        assert leak not in rendered, f"{leak!r} leaked into the ticket header"
+    assert "Change record" not in rendered, "the form's own title leaked"
+
+
+def test_a_ticket_header_drops_everything_that_is_not_a_label(repo):
+    scenario = repo.get("linux-dir-tree-build")
+    header = scenario.ticket_header
+    assert header["System"] == "build-02 (Ubuntu)"
+    assert "Form" not in header
+    # A nested structure cannot become a table cell, whatever key it arrives under.
+    assert all(isinstance(value, str) for value in header.values())
+
+
+def test_a_scenario_without_a_ticket_reports_an_empty_header(repo):
+    # A scenario written before the ticket system has no block at all, so the
+    # header must be empty rather than raise: the session page calls it for every
+    # scenario, ticket or not.
+    scenario = repo.get("linux-dir-tree-build")
+    scenario.ticket = {}
+    assert scenario.ticket_header == {}
+    assert scenario.public()["ticket"] == {}
