@@ -9,7 +9,7 @@ from ontrak.demo import synthesise_ticket
 from ontrak.guest import NullDriver
 from ontrak.incus import IncusError
 from ontrak.models import SessionState, iso, parse_iso, utcnow
-from ontrak.scenarios import JSON_BEGIN, JSON_END
+from ontrak.scenarios import JSON_BEGIN, JSON_END, SETUP_OK_MARKER
 from ontrak.sessions import POOL_SNAPSHOT, SessionError, SessionManager
 
 SCENARIO = "net-dns-failure"
@@ -482,3 +482,117 @@ def test_stats_snapshot(manager, built_template):
     assert stats["sessions"][SessionState.READY.value] == 1
     assert stats["pool"][0]["scenario_id"]
     assert isinstance(stats["templates"], list)
+
+
+# --------------------------------------------------------------------------- #
+# the SSH console transport a Linux template is built with
+#
+# The console iframe used to point an RDP connection at a Linux container, which
+# answers no RDP at all — so every container scenario showed "the remote desktop
+# server is currently unreachable", a page that blamed the student's machine for a
+# transport that was never going to exist. These pin the replacement.
+# --------------------------------------------------------------------------- #
+LINUX_SCENARIO = "linux-dir-tree-build"
+
+
+class RecordingShell(NullDriver):
+    """A NullDriver that also speaks shell and keeps what it was asked to run."""
+
+    def __init__(self, settings, marker: str = "ontrak-console-ready", ok: bool = True):
+        super().__init__(settings, responses={"setup": f"{SETUP_OK_MARKER}\n"})
+        self.marker = marker
+        self.ok = ok
+        self.shell_calls: list[str] = []
+
+    def run_shell(self, script, host="", instance="", timeout=120):
+        from ontrak.guest import CommandResult
+
+        self.shell_calls.append(script)
+        if "openssh-server" in script:
+            stdout = f"provisioned\n{self.marker}\n" if self.ok else "apt failed\n"
+            return CommandResult(self.ok, 0 if self.ok else 1, stdout)
+        return CommandResult(True, 0, "ok")
+
+
+def console_manager(settings, store, repo, incus, driver):
+    """The driver is both halves: these tests are about which scenarios get one."""
+    return SessionManager(
+        settings, store, repo=repo, incus=incus, driver=driver, shell_driver=driver
+    )
+
+
+def test_the_console_script_sets_the_lab_credential_and_enables_the_door(settings):
+    from ontrak.sessions import console_transport_script
+
+    script = console_transport_script(settings)
+    assert f"root:{settings.guest.password}" in script
+    assert "chpasswd" in script
+    assert "PermitRootLogin yes" in script
+    assert "PasswordAuthentication yes" in script
+    # `00-` and not `99-`: sshd keeps the *first* value per keyword and reads
+    # `sshd_config.d` from the top, so only a name sorting ahead of ours outranks it.
+    assert "00-ontrak-console.conf" in script
+    assert "openssh-server" in script
+    assert f":{settings.guest.ssh_port} " in script
+    assert "ontrak-console-ready" in script
+
+
+def test_a_password_with_a_quote_cannot_escape_the_script(settings):
+    from ontrak.sessions import console_transport_script
+
+    settings.guest.password = "pa'ss word"
+    script = console_transport_script(settings)
+    # Single-quoted and the embedded quote doubled — the shell sees one argument,
+    # not a command.
+    assert "'root:pa'\\''ss word'" in script
+
+
+def test_a_linux_template_is_built_with_the_console_transport(settings, store, repo, incus):
+    settings.guac.linux_ssh = True
+    driver = RecordingShell(settings)
+    manager = console_manager(settings, store, repo, incus, driver)
+    manager.ensure_template(LINUX_SCENARIO)
+    assert any("openssh-server" in call for call in driver.shell_calls), driver.shell_calls
+
+
+def test_a_windows_template_gets_no_sshd(settings, store, repo, incus):
+    settings.guac.linux_ssh = True
+    driver = RecordingShell(settings)
+    manager = console_manager(settings, store, repo, incus, driver)
+    manager.ensure_template(SCENARIO)
+    assert not any("openssh-server" in call for call in driver.shell_calls)
+
+
+def test_the_console_transport_is_opt_in(settings, store, repo, incus):
+    settings.guac.linux_ssh = False
+    driver = RecordingShell(settings)
+    manager = console_manager(settings, store, repo, incus, driver)
+    manager.ensure_template(LINUX_SCENARIO)
+    assert not any("openssh-server" in call for call in driver.shell_calls)
+
+
+def test_an_empty_lab_password_refuses_to_build_a_console(settings, store, repo, incus):
+    """An empty password would be `chpasswd`-ed in — a console anyone can open as root."""
+    settings.guac.linux_ssh = True
+    settings.guest.password = ""
+    driver = RecordingShell(settings)
+    manager = console_manager(settings, store, repo, incus, driver)
+    with pytest.raises(SessionError, match="guest.password is empty"):
+        manager._provision_console_transport(
+            type("S", (), {"scenario_id": LINUX_SCENARIO, "instance": "tpl-x"})(),
+            repo.get(LINUX_SCENARIO),
+            driver,
+        )
+
+
+def test_a_transport_that_did_not_install_fails_the_build(settings, store, repo, incus):
+    """A template whose sshd did not come up must fail loudly, not snapshot quietly.
+
+    The failure it replaces: a build that succeeded and a console that reported the
+    remote desktop server as unreachable, with nothing anywhere saying why.
+    """
+    settings.guac.linux_ssh = True
+    driver = RecordingShell(settings, marker="")
+    manager = console_manager(settings, store, repo, incus, driver)
+    with pytest.raises(SessionError, match="SSH console transport was not installed"):
+        manager.ensure_template(LINUX_SCENARIO)

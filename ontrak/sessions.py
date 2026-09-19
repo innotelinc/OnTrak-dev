@@ -39,6 +39,7 @@ from .guest import (
     build_driver,
     build_shell_driver,
     quote_ps,
+    quote_sh,
 )
 from .incus import IncusClient, IncusError
 from .models import ScoreReport, Session, SessionState, iso, parse_iso, seconds_since, utcnow
@@ -60,6 +61,62 @@ from .tickets import grade as mark_ticket
 
 POOL_SNAPSHOT = "clean"
 TEMPLATE_PSEUDO_STUDENT = "<template>"
+
+# Printed by the console-transport provisioning script once sshd is listening; the
+# template build asserts on it rather than trusting the exit code of a pipeline.
+CONSOLE_SETUP_MARKER = "ontrak-console-ready"
+
+
+def console_transport_script(settings: Settings) -> str:
+    """The shell that turns a Linux guest into one the browser console can open.
+
+    Kept as a module-level function over `settings` so the exact text a template
+    build runs is the text a test can read: this script is the difference between a
+    console that works and a page that says the remote desktop server is
+    unreachable, and asserting on a string is how it stays that way.
+    """
+    password = settings.guest.password
+    user = settings.guest.linux_user or "root"
+    port = settings.guest.ssh_port
+    return "\n".join(
+        [
+            "set -e",
+            "export DEBIAN_FRONTEND=noninteractive",
+            # Only the daemon is needed; the client tools, docs and recommends are
+            # dead weight carried by every clone of the image.
+            "if ! command -v sshd >/dev/null 2>&1; then",
+            "  (apt-get update -qq && apt-get install -y -qq --no-install-recommends"
+            " openssh-server) >/dev/null 2>&1 || apt-get install -y -qq"
+            " --no-install-recommends openssh-server >/dev/null 2>&1",
+            "fi",
+            "mkdir -p /run/sshd",
+            # `chpasswd` rather than `passwd`: it does not prompt, and it *unlocks* an
+            # account a scenario locked — which is exactly why it runs last.
+            f"echo {quote_sh(f'{user}:{password}')} | chpasswd",
+            "for key in PermitRootLogin PasswordAuthentication; do",
+            '  if grep -qE "^#?$key" /etc/ssh/sshd_config; then',
+            '    sed -i "s|^#*$key.*|$key yes|" /etc/ssh/sshd_config',
+            '  else',
+            '    echo "$key yes" >> /etc/ssh/sshd_config',
+            "  fi",
+            "done",
+            # Ubuntu and Debian read `Include /etc/ssh/sshd_config.d/*.conf` from near
+            # the *top* of sshd_config, and sshd keeps the **first** value it sees per
+            # keyword — so a drop-in outranks the main file, and an image's own drop-in
+            # could outrank ours. `00-` rather than `99-` is what puts our two lines
+            # first, where nothing but a file named ahead of it can override them.
+            "mkdir -p /etc/ssh/sshd_config.d",
+            "printf '%s\\n' 'PermitRootLogin yes' 'PasswordAuthentication yes'"
+            " > /etc/ssh/sshd_config.d/00-ontrak-console.conf",
+            "systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd"
+            " >/dev/null 2>&1 || true",
+            "systemctl start ssh >/dev/null 2>&1 || systemctl start sshd"
+            " >/dev/null 2>&1 || service ssh start >/dev/null 2>&1 || /usr/sbin/sshd",
+            f"ss -ltn 2>/dev/null | grep -q ':{port} ' || sleep 2",
+            f"ss -ltn 2>/dev/null | grep -q ':{port} '",
+            f"printf '{CONSOLE_SETUP_MARKER}\\n'",
+        ]
+    )
 
 # Workload id prefixes that mean "a Linux guest". Used only to label pool rows for
 # the operator view; the scenario's own `platform` decides how a guest is driven.
@@ -481,6 +538,7 @@ class SessionManager:
                     f"{setup_name} for {scenario_id} did not report {SETUP_OK_MARKER} "
                     f"(exit {result.exit_code}). Output tail: {combined[-800:].strip()}"
                 )
+            self._provision_console_transport(session, scenario, driver)
         finally:
             # Fault injection may leave the guest unresponsive (broken NIC, runaway
             # CPU). Force-stop anyway: the snapshot must capture the fault, and a
@@ -492,6 +550,61 @@ class SessionManager:
         label = f"{scenario_id}@{workload}" if workload else scenario_id
         self.store.log_event("template_built", f"{label} -> {name}/{POOL_SNAPSHOT}")
         return name
+
+    def _provision_console_transport(self, session: Session, scenario, driver: BaseDriver) -> None:
+        """Put an sshd in this Linux template, so the browser console can be a shell.
+
+        Guacamole speaks RDP and SSH. A Linux container answers no RDP at all, so an
+        RDP connection pointed at one produced the console iframe's
+        "the remote desktop server is currently unreachable" — a page that blamed the
+        student's machine for a transport that was never going to exist, and said
+        nothing about the scenario being fine.
+
+        So when ``guac.linux_ssh`` is on, a Linux template is built with sshd running,
+        root's password set to the lab credential, and password auth permitted. It runs
+        *after* the fault is injected and *after* the setup script has verified it, and
+        is the last thing written before the snapshot: a fault that touches accounts or
+        permissions (``id-locked-account``, ``linux-sudo-delegation``) must not be able
+        to take the console's credential with it, and re-asserting it here is what makes
+        that true rather than lucky.
+
+        Off by default and gated on the setting, because it is the one step in a
+        template build that reaches the network (apt) and opens a port in every Linux
+        guest. A build without it behaves exactly as before.
+        """
+        if getattr(scenario, "platform", WINDOWS) != LINUX:
+            return
+        if not self.settings.guac.linux_ssh:
+            return
+        # An empty lab password would make `chpasswd` set an empty one — a console
+        # anyone on the lab network can open as root. Refusing is the only reading of
+        # "this deployment has no credential for the guest" that cannot become that.
+        if not self.settings.guest.password:
+            raise SessionError(
+                "guac.linux_ssh is on but guest.password is empty, so there is nothing "
+                "to authenticate the console with. Set ONTRAK_GUEST__PASSWORD (or turn "
+                "guac.linux_ssh off)."
+            )
+
+        script = console_transport_script(self.settings)
+        user = self.settings.guest.linux_user or "root"
+        result = driver.run_shell(
+            script,
+            timeout=self.settings.session.check_timeout_seconds,
+            **self._guest_args(session),
+        )
+        combined = (result.stdout or "") + (result.stderr or "")
+        if not result.ok or CONSOLE_SETUP_MARKER not in combined:
+            raise SessionError(
+                "the SSH console transport was not installed, so the template's console "
+                f"would report the remote desktop server as unreachable (exit "
+                f"{result.exit_code}). Output tail: {combined[-800:].strip()}"
+            )
+        self.store.log_event(
+            "console_transport",
+            f"{session.scenario_id}: sshd on port {self.settings.guest.ssh_port} as "
+            f"{user} (guac.linux_ssh)",
+        )
 
     def _ready_timeout(self, scenario) -> int:
         if getattr(scenario, "platform", WINDOWS) == LINUX:

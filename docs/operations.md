@@ -171,6 +171,33 @@ their email either way.
 * A session left open on a screenless desktop is recycled automatically
   (`session.idle_recycle_minutes`), so you rarely need to end sessions by hand.
 
+### The student's console: RDP for Windows, SSH for Linux
+
+Guacamole speaks RDP and SSH, and the guest decides which one a scenario needs.
+A Windows VM brokers RDP (`guest.rdp_port`). A Linux *container* answers no RDP at
+all, so an RDP connection aimed at one used to render as a page saying "the remote
+desktop server is currently unreachable" — a message that blamed the student's
+machine for a transport that was never going to exist, and said nothing about the
+scenario being fine.
+
+With `guac.linux_ssh` on, `ontrak template build` provisions the template for a
+shell console instead: `openssh-server` installed, root's password set to
+`guest.password`, `PermitRootLogin` and `PasswordAuthentication` enabled, and a
+`00-ontrak-console.conf` drop-in written into `sshd_config.d` so an image's own
+drop-in cannot override it. That runs **after** the fault is injected and after
+`setup.sh` has verified it, and is the last thing written before the snapshot — a
+fault that touches accounts or permissions (`id-locked-account`,
+`linux-sudo-delegation`) must not be able to take the console's credential with
+it. A build where sshd does not come up **fails**, naming the reason, rather than
+snapshotting a template whose console will lie.
+
+Two consequences worth knowing: it is the one step in a template build that
+reaches the network (apt), and it opens port 22 in every Linux guest on the
+isolated `ontrak0` bridge. Turning it off restores the previous behaviour exactly
+(no console for Linux scenarios, and the page explains why). It also refuses to
+run with an empty `guest.password`, because `chpasswd` would set an empty one and
+the console would then be openable as root by anyone on the lab network.
+
 ### After
 
 ```bash
@@ -219,6 +246,8 @@ for the whole class: a cluster does not make a cold Windows boot faster.
 | "template is missing snapshot clean" | scenario edited, template not rebuilt | `ontrak template build <scenario> --force` |
 | Guacamole shows "connection failed" | target 3389 unreachable from guacd, or wrong credentials | `ontrak session console <id>` to inspect; confirm the VM answers on 3389 from the control node; check `guest.rdp_port` |
 | Console iframe blank | `guac.base_url` is not the URL the student's browser uses, or the page is HTTP while Guacamole is HTTPS | Set `guac.base_url` to the browser-visible HTTPS URL and put a TLS proxy in front |
+| Console says "the remote desktop server is currently unreachable" | the console is an **RDP** connection pointed at a Linux *container*, which answers no RDP at all | Turn on `guac.linux_ssh` and rebuild that scenario's template: the build installs and configures `sshd` (see below), and the console becomes a shell |
+| Console is refused the same way **after** turning on `guac.linux_ssh` | the template predates the setting | Templates are snapshots: re-run `ontrak template build <scenario> --force` for each Linux scenario, or `infra/build-templates.sh`. A template built before the setting existed has no sshd in it |
 | Students say "no machine available" | pool empty and clones are slow | Prewarm more, or move the pool to ZFS/btrfs |
 | Pool keeps growing and the host swaps | refill targets too high for a full class | Lower `pool.targets`, or `pool.max_total`; remember targets count claimed VMs, so `target = class size` is the right shape |
 | Grading returns 0% with "grading could not run" | `check.ps1` failed or never printed the markers | Run it manually in a session; `make validate` first, then check the guest-side error in the network detail line |
