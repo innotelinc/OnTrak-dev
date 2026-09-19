@@ -165,10 +165,47 @@ class CoverageDecidesWhetherANameHasTls(unittest.TestCase):
         self.assertTrue(provision.covers(names, "student.ontrak.innotel.us"))
 
 
+class ExpiryIsReadInBothSpellings(unittest.TestCase):
+    """Cerulean hands back OpenSSL's `notAfter`, not ISO 8601 — measured on the
+    live estate, where the ISO-only parser made every plan want to reissue."""
+
+    def test_openssl_not_after_is_utc(self):
+        when = provision.parse_expiry("Dec 17 19:14:45 2026 GMT")
+        self.assertEqual(when, dt.datetime(2026, 12, 17, 19, 14, 45, tzinfo=dt.timezone.utc))
+
+    def test_openssl_pads_a_single_digit_day_with_two_spaces(self):
+        when = provision.parse_expiry("Dec  7 19:14:45 2026 GMT")
+        self.assertEqual(when, dt.datetime(2026, 12, 7, 19, 14, 45, tzinfo=dt.timezone.utc))
+
+    def test_iso_8601_still_works(self):
+        when = provision.parse_expiry("2026-12-17T19:14:45Z")
+        self.assertEqual(when, dt.datetime(2026, 12, 17, 19, 14, 45, tzinfo=dt.timezone.utc))
+
+    def test_a_naive_iso_value_is_taken_as_utc(self):
+        when = provision.parse_expiry("2026-12-17T19:14:45")
+        self.assertEqual(when.tzinfo, dt.timezone.utc)
+
+    def test_nonsense_is_none(self):
+        self.assertIsNone(provision.parse_expiry("whenever"))
+        self.assertIsNone(provision.parse_expiry(""))
+
+
 class ACertificateIsReusedOrReissued(unittest.TestCase):
     def test_a_healthy_wildcard_is_reused(self):
         chosen = provision.select_certificate([cert(wildcard=True)], "student.ontrak.innotel.us", 21)
         self.assertEqual(chosen["id"], 7)
+
+    def test_a_wildcard_with_an_openssl_expiry_is_reused(self):
+        # The exact row shape the live Cerulean returned for certificate #31.
+        live = cert(
+            id=31,
+            wildcard=True,
+            domains=["ontrak.innotel.us", "*.ontrak.innotel.us"],
+            expiresAt="Dec 17 19:14:37 2026 GMT",
+        )
+        far_from_it = dt.datetime(2026, 9, 18, tzinfo=dt.timezone.utc)
+        chosen = provision.select_certificate([live], "student.ontrak.innotel.us", 21, now=far_from_it)
+        self.assertEqual(chosen["id"], 31)
 
     def test_an_unparseable_expiry_is_not_reused(self):
         broken = cert(wildcard=True, expiresAt="whenever")

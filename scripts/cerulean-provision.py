@@ -39,7 +39,10 @@ Configuration (environment; every one has a default that matches the estate):
     CERULEAN_API_TOKEN      the ceru_ service key (required to do anything)
     ONTRAK_DNS_ZONE         innotel.us      — the zone the names live in
     ONTRAK_EDGE_IP          73.68.203.71    — what the names resolve to (the edge)
-    ONTRAK_FORWARD_HOST     192.168.1.46    — where the edge forwards: the lab host
+    ONTRAK_FORWARD_HOST     192.168.1.46    — where the edge forwards: the range's
+                                              gateway. Set this when the range
+                                              runs elsewhere (pass --repoint to
+                                              move a live name).
     ONTRAK_PORTAL_PORT      8080    — the one port the edge forwards
 
 Exit codes: 0 = the plan ran (or was applied) cleanly, 1 = a step failed,
@@ -247,12 +250,27 @@ def covers(names: list[str], fqdn: str) -> bool:
     return False
 
 
+# Cerulean reports `expiresAt` in OpenSSL's `notAfter` spelling
+# (`Dec 17 19:14:45 2026 GMT`), not ISO 8601. Treating that as unparseable made
+# every plan say "would request a certificate" for names that already had a
+# healthy one, and every --apply mint two fresh Let's Encrypt certificates.
+_OPENSSL_EXPIRY = "%b %d %H:%M:%S %Y"
+
+
 def parse_expiry(value: str) -> dt.datetime | None:
-    try:
-        when = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return when if when.tzinfo else when.replace(tzinfo=dt.timezone.utc)
+    text = str(value).strip()
+    # OpenSSL always prints the zone as GMT; the value is UTC either way.
+    openssl = text[: -len(" GMT")] if text.endswith(" GMT") else text
+    for parse in (
+        lambda: dt.datetime.fromisoformat(text.replace("Z", "+00:00")),
+        lambda: dt.datetime.strptime(openssl, _OPENSSL_EXPIRY),
+    ):
+        try:
+            when = parse()
+        except ValueError:
+            continue
+        return when if when.tzinfo else when.replace(tzinfo=dt.timezone.utc)
+    return None
 
 
 def select_certificate(
@@ -380,10 +398,9 @@ def ensure_certificate(
     certificates = api.get_list("/api/certificates", "certificates")
     reusable = select_certificate(certificates, fqdn, renew_days)
     if reusable is not None:
-        return reusable["id"], (
-            f"certificate #{reusable['id']} covers {fqdn} "
-            f"(expires {str(reusable.get('expiresAt'))[:10]})"
-        )
+        # select_certificate only returns rows whose expiry parsed.
+        expires = parse_expiry(reusable["expiresAt"]).date().isoformat()
+        return reusable["id"], f"certificate #{reusable['id']} covers {fqdn} (expires {expires})"
     if not apply:
         return None, f"would request a certificate for {fqdn}"
 
