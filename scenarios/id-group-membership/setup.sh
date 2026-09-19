@@ -13,6 +13,14 @@ IDP_STATE=/var/lib/ontrak-idp/directory.json
 IDP_PY="$(cd "$(dirname "$0")/../.." && pwd)/lib/idp.py"
 IDP="python3 $IDP_PY --state $IDP_STATE"
 
+if ! command -v python3 >/dev/null 2>&1; then
+    # Debian's minimal container image ships without python3 (Ubuntu's has it), and
+    # the directory service is a Python script — so the template build installs it
+    # here, once, before the snapshot. Stdlib only; no pip.
+    (apt-get update -qq && apt-get install -y -qq --no-install-recommends python3 >/dev/null 2>&1) || true
+fi
+ontrak_require "python3 is available to run the directory service" command -v python3
+
 mkdir -p /var/lib/ontrak-idp
 rm -f "$IDP_STATE"
 $IDP seed-preset team-move
