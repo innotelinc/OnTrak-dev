@@ -271,6 +271,109 @@ class SessionManager:
             )
         return rows
 
+    def scenario_availability(self, scenario_id: str, workload: str | None = None) -> str:
+        """``""`` when a session can start, otherwise the reason it cannot.
+
+        Provisioning needs exactly one of two things: a booted machine in the pool
+        to claim, or the template's ``clean`` snapshot to clone. When neither
+        exists the session is doomed before it starts — which is how a student
+        ended up holding a session whose entire content was
+        ``template tpl-sw-app-crash is missing snapshot clean``: the portal took
+        the request, the worker failed in a thread, and the row came back ``error``
+        carrying a message written for an operator.
+
+        Asking first means a scenario the range cannot run is refused before a
+        session row exists, so the student gets something they can act on (and hand
+        to an instructor) instead of a burned slot.
+        """
+        scenario = self.repo.get(scenario_id)  # raises ScenarioError for unknown ids
+        workload = self._resolve_workload(scenario_id, workload)
+        incus = self.incus
+        if incus is None:  # demo / CI: there is nothing to probe
+            return ""
+        template = self.settings.incus.template_name(scenario.id, workload)
+        label = f"{scenario.id}@{workload}" if workload else scenario.id
+        base_image = self._base_image(scenario, workload)
+        try:
+            if incus.exists(template) and incus.has_snapshot(template, POOL_SNAPSHOT):
+                return ""
+            if self._available_pool(scenario.id, workload=workload):
+                return ""
+            image_published = incus.image_exists(base_image)
+        except IncusError:
+            # An unreachable hypervisor cannot tell us this scenario is *unrunnable*,
+            # only that we cannot tell. Claiming a block here would refuse every
+            # scenario on the range during an Incus outage; the session start path
+            # reports the hypervisor failure the way it always has.
+            return ""
+        # Nothing can serve it. Name the layer that is actually missing, because
+        # the two have different repairs and only one of them is a template build.
+        if not image_published:
+            entry = self.workload_entry(workload) if workload else self.workload_for(scenario)
+            if entry is not None:
+                return (
+                    f"{scenario.id} is not available on this range yet: the "
+                    f"{base_image!r} image it is built from has not been published. "
+                    f"Ask an instructor to run `ontrak image build {entry.id}`."
+                )
+            return (
+                f"{scenario.id} is not available on this range yet: the golden image "
+                f"{base_image!r} has not been built, so every scenario that runs on it "
+                "is unavailable. Ask an instructor to run infra/build-golden-image.sh."
+            )
+        return (
+            f"{scenario.id} is not available on this range yet: its template "
+            f"{template} has not been built. Ask an instructor to run "
+            f"`ontrak template build {label}`."
+        )
+
+    # How long the dashboard's unavailability map is reused. Every probe behind it
+    # is an `incus` CLI round trip, so asking on every page load made the dashboard
+    # pay for it on each render; a scenario's template does not appear and vanish
+    # within half a minute.
+    UNAVAILABLE_TTL_SECONDS = 30.0
+
+    def unavailable_scenarios(self) -> dict[str, str]:
+        """``{scenario_id: reason}`` for every scenario this range cannot start.
+
+        Computed per *pair* — a scenario offered on more than one workload counts as
+        available when any of them can run, since the student picks the scenario and
+        the portal resolves the workload. Cached briefly (see
+        :attr:`UNAVAILABLE_TTL_SECONDS`) so the dashboard is not paying for a probe
+        per scenario on every render.
+        """
+        if self.incus is None:  # demo / CI
+            return {}
+        now = time.monotonic()
+        cached = getattr(self, "_unavailable_cache", None)
+        if cached is not None and now - cached[0] < self.UNAVAILABLE_TTL_SECONDS:
+            return dict(cached[1])
+        try:
+            startable = {
+                (row["scenario_id"], row["workload"])
+                for row in self.template_status()
+                if row["ready"]
+            }
+            for status in self.pool_status():
+                if status.ready:
+                    startable.add((status.scenario_id, status.workload))
+            reasons: dict[str, str] = {}
+            for scenario, workload in self.workload_pairs():
+                if (scenario.id, workload) in startable:
+                    reasons.pop(scenario.id, None)
+                    continue
+                reasons.setdefault(scenario.id, self.scenario_availability(scenario.id, workload))
+        except IncusError as exc:
+            # Every probe behind this map is an Incus round trip, so an unreachable
+            # hypervisor fails all of them. Refusing every scenario would turn an
+            # Incus outage into "this range has no scenarios" — the dashboard already
+            # says the hypervisor is the problem, in its own banner. Not cached, so
+            # the map fills in as soon as Incus answers again.
+            self.store.log_event("unavailable_probe_failed", str(exc))
+            return {}
+        self._unavailable_cache = (now, dict(reasons))
+        return reasons
+
     def build_templates(
         self, ids: list[str] | None = None, force: bool = False, workloads: list[str] | None = None
     ) -> dict[str, str]:

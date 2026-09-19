@@ -101,6 +101,7 @@
   <h2>{{ group.label }}</h2>
   <div class="grid">
     {% for scenario in group.scenarios %}
+      {% set off = (unavailable or {}).get(scenario.id) %}
       <div class="ticket">
         <div class="ticket-head">
           <strong>{{ scenario.title }}</strong>
@@ -113,13 +114,20 @@
           {% if scenario.tags %}&middot; {{ scenario.tags|join(", ") }}{% endif %}
         </p>
         <p>{{ scenario.briefing.split("\n\n")[0][:320] }}{% if scenario.briefing|length > 320 %}…{% endif %}</p>
-        <form method="post" action="/sessions/start" class="inline ticket-form">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <input type="hidden" name="scenario_id" value="{{ scenario.id }}">
-          <input type="hidden" name="workload" value="">
-          <input type="hidden" name="time_limit" value="{{ time_limits[0] }}">
-          <button type="submit">Start this ticket</button>
-        </form>
+        {% if off %}
+          {# Offered but not startable: say so here, and say what unblocks it. The
+             alternative is what used to happen — the card looked identical, the
+             click made a session, and it came back `error`. #}
+          <p class="muted small"><span class="badge">not available</span> {{ off }}</p>
+        {% else %}
+          <form method="post" action="/sessions/start" class="inline ticket-form">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="scenario_id" value="{{ scenario.id }}">
+            <input type="hidden" name="workload" value="">
+            <input type="hidden" name="time_limit" value="{{ time_limits[0] }}">
+            <button type="submit">Start this ticket</button>
+          </form>
+        {% endif %}
       </div>
     {% endfor %}
   </div>

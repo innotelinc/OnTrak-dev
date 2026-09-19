@@ -7,6 +7,7 @@ import pytest
 
 from ontrak.demo import synthesise_ticket
 from ontrak.guest import NullDriver
+from ontrak.incus import IncusError
 from ontrak.models import SessionState, iso, parse_iso, utcnow
 from ontrak.scenarios import JSON_BEGIN, JSON_END
 from ontrak.sessions import POOL_SNAPSHOT, SessionError, SessionManager
@@ -105,6 +106,61 @@ def test_scenario_declared_devices_are_attached_to_the_template(manager, incus, 
 def test_build_templates_reports_per_scenario_results(manager):
     results = manager.build_templates(["net-dns-failure", "sw-app-crash"])
     assert results == {"net-dns-failure": "ready", "sw-app-crash": "ready"}
+
+
+# --------------------------------------------------------------------------- #
+# availability — refusing a scenario the range cannot start
+# --------------------------------------------------------------------------- #
+# A student who started a scenario the range could not run used to end up with a
+# session row whose entire content was `template tpl-sw-app-crash is missing
+# snapshot clean` — an operator's message, delivered after a slot was spent. The
+# availability check is what turns that into a refusal they can act on, so it is
+# tested for both the refusal and the two ways it must stay silent.
+#
+def test_a_built_template_is_available(manager, built_template):
+    assert manager.scenario_availability(SCENARIO) == ""
+
+
+def test_a_scenario_with_no_template_is_refused_by_name(manager, incus):
+    reason = manager.scenario_availability("sw-app-crash")
+    assert reason.startswith("sw-app-crash is not available on this range yet")
+    # The repair is named, because "unavailable" without a next step is just a wall.
+    assert "tpl-sw-app-crash" in reason
+    assert "ontrak template build sw-app-crash" in reason
+
+
+def test_a_missing_golden_image_is_named_as_the_cause(manager, incus):
+    """The Windows scenarios layer differently from the Linux ones: none of them
+    has a template, and building one template would not fix any of them."""
+    incus.image_present = False
+    reason = manager.scenario_availability("sw-app-crash")
+    assert "ontrak-win-base" in reason
+    assert "build-golden-image.sh" in reason
+
+
+def test_a_waiting_pooled_machine_makes_a_scenario_available(manager, incus, settings):
+    """No template, but a booted machine already in the pool: the session can run,
+    so refusing it would be wrong."""
+    incus.add_instance(settings.incus.pool_name("sw-app-crash", 1), running=True)
+    assert manager.scenario_availability("sw-app-crash") == ""
+
+
+def test_an_unreachable_hypervisor_is_not_a_missing_template(manager, incus):
+    """An Incus outage cannot prove a scenario is unrunnable, only that we cannot
+    tell — refusing every scenario would be a worse failure than the outage."""
+    incus.exists = _boom  # type: ignore[method-assign]
+    assert manager.scenario_availability("sw-app-crash") == ""
+    assert manager.unavailable_scenarios() == {}
+
+
+def test_unavailable_scenarios_lists_what_cannot_start(manager, incus, built_template):
+    reasons = manager.unavailable_scenarios()
+    assert SCENARIO not in reasons  # its template is built
+    assert "sw-app-crash" in reasons
+
+
+def _boom(*args, **kwargs):
+    raise IncusError(["list", "--format=json"], 1, "The incus daemon doesn't appear to be started")
 
 
 # --------------------------------------------------------------------------- #

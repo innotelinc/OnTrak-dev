@@ -452,6 +452,7 @@ def create_app(
                 "auto_assign": settings.selection.auto_assign,
                 "strategy": settings.selection.strategy,
                 "results": store.results_for_student(user["username"])[:10],
+                "unavailable": request.app.state.manager.unavailable_scenarios(),
             },
         )
 
@@ -485,6 +486,13 @@ def create_app(
             scenario_id = choice.scenario.id
         limit = int(time_limit) if str(time_limit).isdigit() and int(time_limit) > 0 else None
         try:
+            # Refuse a scenario this range cannot start *before* a session exists. The
+            # provisioning failure is caught in a worker thread, so without this the
+            # student's only clue is an `error` row carrying an operator's message —
+            # a slot burned on a machine that was never going to boot.
+            unavailable = manager.scenario_availability(scenario_id, workload or None)
+            if unavailable:
+                return redirect("/dashboard", request, unavailable)
             session = manager.create_session(
                 user["username"], scenario_id, workload=workload or None, time_limit_minutes=limit
             )

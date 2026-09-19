@@ -133,6 +133,41 @@ def test_full_student_flow(app_client):
     assert report.resolved is True
 
 
+def test_starting_a_scenario_this_range_cannot_run_is_refused(app_client):
+    """The refusal has to happen before a session row exists.
+
+    The whole point of asking first is that the student does not end up holding a
+    session whose only content is an operator's template error — a spent slot that
+    also has to be cleaned up. So this asserts the message *and* the absence of the
+    row the old path would have created.
+    """
+    client, app = app_client
+    login(client, "alice")
+
+    response = client.post(
+        "/sessions/start", data={"scenario_id": "sw-app-crash", "csrf": csrf(client)}
+    )
+    assert response.status_code == 200  # the redirect was followed
+    assert "not available on this range yet" in response.text
+    assert not app.state.store.list_sessions(scenario_id="sw-app-crash")
+    assert app.state.store.live_sessions_for("alice") == []
+
+
+def test_the_dashboard_flags_a_scenario_that_cannot_start(app_client):
+    client, app = app_client
+    login(client, "alice")
+    page = client.get("/dashboard")
+    assert page.status_code == 200
+    # The card is still shown (a student may want to ask for it) but it carries the
+    # reason and no start button, instead of looking identical to a working one.
+    assert "sw-app-crash" in page.text
+    assert "not available on this range yet" in page.text
+    # ...and no start form: the hidden scenario_id input is how a card submits.
+    assert 'value="sw-app-crash"' not in page.text
+    # The scenario that can run still has its button.
+    assert f'value="{SCENARIO}"' in page.text
+
+
 def test_hints_unlock_only_after_an_attempt(app_client):
     client, app = app_client
     login(client, "alice")
