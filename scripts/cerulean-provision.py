@@ -39,10 +39,14 @@ Configuration (environment; every one has a default that matches the estate):
     CERULEAN_API_TOKEN      the ceru_ service key (required to do anything)
     ONTRAK_DNS_ZONE         innotel.us      — the zone the names live in
     ONTRAK_EDGE_IP          73.68.203.71    — what the names resolve to (the edge)
-    ONTRAK_FORWARD_HOST     192.168.1.46    — where the edge forwards: the range's
+    ONTRAK_FORWARD_HOST     192.168.1.62    — where the edge forwards: the range's
                                               gateway. Set this when the range
                                               runs elsewhere (pass --repoint to
-                                              move a live name).
+                                              move a live name). Running without
+                                              it warns, because a stale address
+                                              here is how the three names end up
+                                              pointing at a host that stopped
+                                              running the portal.
     ONTRAK_PORTAL_PORT      8080    — the one port the edge forwards
 
 Exit codes: 0 = the plan ran (or was applied) cleanly, 1 = a step failed,
@@ -66,6 +70,14 @@ BASE_NAME = "ontrak.innotel.us"
 STUDENT_NAME = "student.ontrak.innotel.us"
 ADMIN_NAME = "admin.ontrak.innotel.us"
 WILDCARD = "*.ontrak.innotel.us"
+
+# Where the edge forwards when ONTRAK_FORWARD_HOST is unset: the range host's own
+# address, which is the estate's current one. The range host has moved before, and
+# each move left the names forwarding to the previous machine — a host that still
+# answers ping while nothing serves the portal on it, which reads as the stack
+# being down. An unset variable therefore says so rather than applying the shipped
+# address in silence.
+SHIPPED_FORWARD_HOST = "192.168.1.62"
 
 # The console is a path on the range's own name, which is what
 # ONTRAK_GUAC__BASE_URL points at. Cerulean's NPM bridge forwards a host, not a
@@ -506,7 +518,15 @@ def plan(args) -> int:
     base = setting("CERULEAN_API_URL", "https://cerulean.innotel.us")
     zone = setting("ONTRAK_DNS_ZONE", "innotel.us")
     edge_ip = setting("ONTRAK_EDGE_IP", "73.68.203.71")
-    forward_host = setting("ONTRAK_FORWARD_HOST", "192.168.1.46")
+    forward_host = setting("ONTRAK_FORWARD_HOST")
+    if not forward_host:
+        forward_host = SHIPPED_FORWARD_HOST
+        print(
+            f"note: ONTRAK_FORWARD_HOST is unset, so the edge will forward to the shipped "
+            f"default {SHIPPED_FORWARD_HOST}. Set it to the range's own address when the range "
+            f"runs elsewhere.",
+            file=sys.stderr,
+        )
     portal_port = int(setting("ONTRAK_PORTAL_PORT", "8080"))
 
     if not token:

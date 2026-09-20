@@ -195,7 +195,8 @@ those browsers actually use; the console payload travels in a URL fragment and
 must never cross a network in plain text off-host.
 
 **If the TLS proxy is itself a container on this host, loopback will not do.** The
-edge forwards to the host's address (`192.168.1.46:8080`), and a loopback binding
+edge forwards to the host's address (`192.168.1.62:8080`, the current range host —
+`ONTRAK_FORWARD_HOST`), and a loopback binding
 answers that from the host's *own* process namespace — not from another container,
 which reaches the published port over the bridge. The symptom is a 502 from the
 edge while `curl 127.0.0.1:8080` succeeds on the host, which reads as the stack
