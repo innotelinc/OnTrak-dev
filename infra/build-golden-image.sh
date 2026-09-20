@@ -24,6 +24,8 @@
 #   ONTRAK_IMAGE_ALIAS      published alias (default ontrak-win-base)
 #   ONTRAK_GOLDEN_CPUS      vCPU for the build VM (default 2)
 #   ONTRAK_GOLDEN_MEMORY    RAM for the build VM (default 6GB)
+#   ONTRAK_GOLDEN_DISK      disk for the build VM, and so the published image
+#                           (default 32GiB)
 
 set -euo pipefail
 
@@ -104,6 +106,30 @@ if sed -i '/^incus config device set "${name}" root io.bus=virtio-blk$/a incus c
   log "build disk set to io.cache=none (keeps the Windows image apply out of the host page cache)"
 else
   warn "could not set io.cache=none on the build disk: tools/pack.sh no longer matches — on a 16 GiB range host, expect the OOM kill described above"
+fi
+
+# ---------------------------------------------------- build disk (and image) ----
+# tools/pack.sh creates its build VM at 30 GiB and then grows the disk to 60 GiB
+# before the install. That size is not just the build VM's: `incus publish` tars
+# the *apparent* disk into the image — it does not skip holes, and on this host it
+# is not even gzip's input size that matters, because a Linux guest's partition
+# table is the whole disk by construction.
+#
+# What that costs was measured, not guessed. Publishing a 60 GiB build disk with
+# --compression none wrote for fourteen minutes and then failed with "Failed to
+# begin transaction: context deadline exceeded" — the image store and Incus's own
+# cowsql database share one dataset, and the copy starves the database's leader
+# election. The daemon's DB is left unusable, every `incus` command times out, and
+# the fully-installed Windows disk has to be recovered by hand. It happened twice.
+#
+# A Windows 11 install needs ~20 GiB, so 32 GiB is plenty of headroom and the
+# published image is half the size. Raise it only if a scenario's media needs it.
+BUILD_DISK="${ONTRAK_GOLDEN_DISK:-32GiB}"
+if sed -i -E "/^\s*incus config device set .*root size=[0-9]+GiB/s/root size=[0-9]+GiB/root size=${BUILD_DISK}/" "$CHECKOUT/tools/pack.sh" \
+   && grep -q -- "root size=${BUILD_DISK}" "$CHECKOUT/tools/pack.sh"; then
+  log "build disk sized at ${BUILD_DISK} (ONTRAK_GOLDEN_DISK) — this is also the published image's disk"
+else
+  warn "could not size the build disk: tools/pack.sh no longer matches — expect a 60 GiB image, a long publish, and possibly a wedged Incus database"
 fi
 
 # ------------------------------------------------------------------- build ----

@@ -262,6 +262,7 @@ for the whole class: a cluster does not make a cold Windows boot faster.
 | --- | --- | --- |
 | Session sits in `provisioning`, then `error` | guest transport never answered | Check `session.error` on the page, then `ONTRAK_INCUS__REMOTE=... incus --project ontrak info <instance>`; confirm the guest has an IP on `ontrak0`. If RDP is up but WinRM is not, the image's `post-install.ps1` step did not run — rebuild the golden image. |
 | `make golden` reports success but every Windows template then hangs at the firmware boot prompt, and `ontrak doctor` still says the golden image is present | the ISO install was OOM-killed and the half-applied disk was published as the image. Incus gives a VM disk the host write cache by default, so applying the ~7 GiB Windows image is charged to the container's memory cgroup; on a 16 GiB range host the kernel kills qemu part-way through the apply. The pinned builder (`tools/click.py`) then only waits for `incus ls` to report STOPPED — it cannot tell that kill from the clean sysprep shutdown it expects — and `pack.sh` publishes the truncated disk anyway | `infra/build-golden-image.sh` now sets the build disk to `io.cache=none` and bounds the guest RAM (`ONTRAK_GOLDEN_CPUS`/`ONTRAK_GOLDEN_MEMORY`), which removes the pressure that caused the kill. Re-run `make golden`. To check a suspect image, inspect its ESP: a formatted-but-empty ESP (no `EFI/Microsoft/Boot/bootmgfw.efi`) means the apply never finished |
+| `make golden` gets all the way through the install and then fails part-way through publishing, and from that point every `incus` command fails with `Failed to begin transaction: no available cowsql leader server found` or `context deadline exceeded` | `incus publish` tars the build disk's *apparent* size into the image — holes are not skipped — and the image store shares a dataset with Incus's own cowsql database, so a long enough copy starves the database's leader election and takes the daemon's DB with it. The bigger the build disk, the worse it gets: a 60 GiB disk copied with `--compression none` ran for fourteen minutes before wedging the DB, and a 29 GiB one ran fifteen | Size the build disk small (already done: `ONTRAK_GOLDEN_DISK`, default 32 GiB) and let `incus publish` keep its default gzip (`--compression none` is the mistake, not the fix). If the DB is already wedged, `systemctl restart incus` clears it — the installed disk survives, so recover rather than rebuild: publish that instance instead of re-running the 30-60 minute install |
 | `pywinrm` errors with 401 | wrong training password, or the account is not a local admin | Compare with `guest.password`; the image sets `LocalAccountTokenFilterPolicy=1` so elevation should work |
 | Template build fails with "never obtained an address" | wrong bridge or DHCP range exhausted | `incus network get ontrak0 ipv4.dhcp.ranges`; widen the range for large classes |
 | Template build fails with "did not report ONTRAK-SETUP-OK" | the setup script threw | The error includes the output tail; run the VM manually and execute `setup.ps1` to see the full error |
@@ -371,9 +372,10 @@ no password — mounted only while `demo.enabled` is on.
   dependency, not a runtime one, and its interface changes between versions. Two of
   its behaviours have bitten this stack and are worked around in
   `infra/build-golden-image.sh`: it sizes its build VM at the whole host (rewritten
-  to `ONTRAK_GOLDEN_CPUS`/`ONTRAK_GOLDEN_MEMORY`) and its `tools/click.py` treats any
-  stop as a finished install, so a killed build publishes silently — see the
-  golden-image row above.
+  to `ONTRAK_GOLDEN_CPUS`/`ONTRAK_GOLDEN_MEMORY`), it grows the build disk to 60 GiB
+  (rewritten to `ONTRAK_GOLDEN_DISK`, because that disk becomes the published image),
+  and its `tools/click.py` treats any stop as a finished install, so a killed build
+  publishes silently — see the golden-image rows above.
 
 ## Legacy platform notes
 
