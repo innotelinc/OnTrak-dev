@@ -92,13 +92,32 @@ if [[ -n "${ONTRAK_VIRTIO_VERSION:-}" ]]; then
   [[ -n "${ONTRAK_VIRTIO_SHA256:-}" ]] && export VIRTIO_SHA256="$ONTRAK_VIRTIO_SHA256"
 fi
 sh build.sh "$TARGET"
-log "importing the built image into Incus"
-sh tools/import.sh "./output/${TARGET}/"
+
+# Two things about incus-windows' import step are worth knowing, because both of
+# them made this script fail *after* a 30-60 minute build:
+#
+#   * build.sh writes its image to ./output/win<target> (OUTDIR=${OUTDIR:-
+#     ./output/win${VERSION}}), not ./output/<target>. tools/import.sh takes that
+#     directory as its argument, so passing ./output/${TARGET} pointed at a path
+#     that never exists.
+#   * tools/import.sh runs a bare `incus image import`, which means the default
+#     project. The templates this image exists for live in $PROJECT, and an image
+#     alias is project-scoped, so "incus --project $PROJECT init <alias>" could not
+#     see it. Import into the project the templates are built in, using the same
+#     requirements flag upstream uses.
+IMPORT_ALIAS="win${TARGET}"
+OUTDIR="./output/${IMPORT_ALIAS}"
+[[ -f "$OUTDIR/incus.tar.xz" ]] || OUTDIR="./output/${TARGET}"
+[[ -f "$OUTDIR/incus.tar.xz" && -f "$OUTDIR/disk.qcow2" ]] \
+  || die "the build produced no image: expected incus.tar.xz and disk.qcow2 under ./output/${IMPORT_ALIAS} (a stale directory there makes build.sh bail out early -- remove it and retry)"
+log "importing the built image into Incus (project $PROJECT)"
+incus --project "$PROJECT" image import "$OUTDIR/incus.tar.xz" "$OUTDIR/disk.qcow2" \
+  requirements.cdrom_agent=true --alias "$IMPORT_ALIAS"
 popd >/dev/null
 
 # The imported image keeps whatever alias incus-windows chose; find the newest one
 # that looks like a Windows image and work with it explicitly.
-mapfile -t CANDIDATES < <(incus image list --format=csv -c L,f | grep -i -E 'win' | awk -F, '{print $1}' | tail -n 5)
+mapfile -t CANDIDATES < <(incus --project "$PROJECT" image list --format=csv -c L,f 2>/dev/null | grep -i -E 'win' | awk -F, '{print $1}' | tail -n 5)
 [[ ${#CANDIDATES[@]} -gt 0 ]] || die "no Windows image found after import; check the build output above"
 SOURCE_IMAGE="${ONTRAK_SOURCE_IMAGE:-${CANDIDATES[${#CANDIDATES[@]}-1]}}"
 log "using imported image: $SOURCE_IMAGE"
@@ -133,9 +152,9 @@ log "shutting the build VM down cleanly"
 # published image from a hard power-off is still usable for the next clone.
 incus --project "$PROJECT" stop "$BUILD_VM" --timeout 120 || incus --project "$PROJECT" stop "$BUILD_VM" --force
 
-if incus image info "$IMAGE_ALIAS" >/dev/null 2>&1; then
+if incus --project "$PROJECT" image info "$IMAGE_ALIAS" >/dev/null 2>&1; then
   warn "replacing the existing image alias $IMAGE_ALIAS"
-  incus image delete "$IMAGE_ALIAS"
+  incus --project "$PROJECT" image delete "$IMAGE_ALIAS"
 fi
 
 log "publishing as $IMAGE_ALIAS"
