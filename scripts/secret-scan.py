@@ -21,6 +21,14 @@ It flags:
      takes its closing quote as the opening quote of a value — which is how a
      marker constant came to be reported as a credential in this repository.
 
+     A value the line *builds* at run time is not stored either. When the literal
+     is one operand of a concatenation and the same line draws on a random
+     source (``os.urandom``, ``secrets``, ``token_hex`` …), no committed text is
+     the credential: ``3-media/monarch/scripts/verify-sso.py``'s throwaway
+     ``"E2e-Sso-" + os.urandom(6).hex() + "!Aa1"`` is the case this spares. Both
+     halves are required, so a secret merely split across two literals
+     (``"hunter2" + "hunter2"``) still reads as a stored credential.
+
 Matched values are masked in the output, so a finding never re-prints the
 secret it found.
 
@@ -77,6 +85,17 @@ FIELD_NAME_VALUE = re.compile(r"^[A-Z]+(_[A-Z]+)+$")
 # A vault:// reference names the secret to fetch at runtime (scheme, path,
 # optional #field) — the value in the file is a pointer, not the secret.
 VAULT_REFERENCE = re.compile(r"^vault://", re.IGNORECASE)
+
+# A value built at run time: the literal is one operand of a concatenation *and*
+# the same line draws on a random source. Both halves are required (see the
+# module docstring): each alone would be loose enough to hide a real secret —
+# concatenation alone excuses a value split across literals, and a random source
+# alone excuses any line that happens to mention one.
+RUNTIME_SECRET_SOURCE = re.compile(
+    r"\b(os\.urandom|secrets\.\w+|random\.\w+|uuid\.uuid4|token_hex|token_urlsafe|getrandom|Crypto\.Random)\b"
+)
+CONCATENATION_AFTER = re.compile(r"^\s*\+")
+CONCATENATION_BEFORE = re.compile(r"\+\s*$")
 
 # Values that look like configuration rather than credentials.
 PLACEHOLDER_HINTS = (
@@ -163,6 +182,23 @@ def inside_spans(position: int, spans: list[tuple[int, int]]) -> bool:
     return any(start < position < end for start, end in spans)
 
 
+def is_runtime_composed(line: str, match: re.Match[str]) -> bool:
+    """Is this literal one operand of a value the line generates at run time?
+
+    The assignment rule sees a password literal such as ``"E2e-Sso-"`` inside a
+    longer expression; if the literal is joined to something else and the line
+    reaches for a random source, the committed text is a prefix, not the
+    credential. (Written without the assignment shape on purpose: this file is
+    scanned by its own hook, and ``name = "literal"`` in a docstring is exactly
+    the false positive rule 2 exists to avoid.)
+    """
+    if not RUNTIME_SECRET_SOURCE.search(line):
+        return False
+    after = line[match.end("value") + 1:]        # skip the closing quote
+    before = line[:match.start("value") - 1]     # drop the opening quote
+    return bool(CONCATENATION_AFTER.match(after) or CONCATENATION_BEFORE.search(before))
+
+
 def is_placeholder(value: str) -> bool:
     lowered = value.strip().lower()
     if not lowered:
@@ -208,6 +244,8 @@ def scan_text(label: str, text: str) -> list[Finding]:
             if LOCATION_NAME.search(name) and LOCATION_VALUE.match(value):
                 continue
             if VAULT_REFERENCE.match(value):
+                continue
+            if is_runtime_composed(line, match):
                 continue
             findings.append((label, number, f"literal-secret ({name})", mask(value)))
 
