@@ -199,6 +199,32 @@ def _session_link(request: Request, session) -> str:
         return ""
 
 
+def _machine_address(settings, scenario, session) -> dict:
+    """What a student connects to, and how, for this scenario's platform.
+
+    A Windows guest brokers RDP on ``guest.rdp_port``; a Linux guest is a shell,
+    reached over SSH on ``guest.ssh_port`` when the template runs an sshd
+    (``guac.linux_ssh``) and otherwise through the Incus agent on the host. Either
+    way it is a string the portal already holds, so it belongs on the page. The
+    alternative - telling the student to ask their instructor - puts a person in the
+    loop for every session and leaves a blank page when nobody is watching.
+    """
+    host = session.host_ip
+    if not host:
+        return {"host": "", "target": "", "user": "", "transport": ""}
+    if scenario.is_linux:
+        user = settings.guest.linux_user or "root"
+        if settings.guac.linux_ssh:
+            return {"host": host,
+                    "target": f"ssh {user}@{host} -p {settings.guest.ssh_port}",
+                    "user": user, "transport": "SSH"}
+        # No sshd in the image: the shell is the guest's own console, not a socket.
+        return {"host": host, "target": host, "user": user, "transport": "shell"}
+    return {"host": host,
+            "target": f"{host}:{settings.guest.rdp_port}",
+            "user": session.rdp_user or settings.guest.user, "transport": "RDP"}
+
+
 def _console_gateway_verdict(request: Request) -> tuple[str, str]:
     """Cached ``(state, detail)`` for the console gateway's key agreement.
 
@@ -597,6 +623,7 @@ def create_app(
                 "preview": preview,
                 "console_url": console_url,
                 "console_refused": console_refused,
+                "address": _machine_address(settings, scenario, session),
                 "events": store.events_for(session.id, limit=15) if session.id else [],
                 "states": SessionState,
                 "time_limits": settings.session.time_limit_choices,

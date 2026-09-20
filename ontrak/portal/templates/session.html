@@ -4,6 +4,10 @@
 {% set outcome_map = {} %}
 {% if shown %}{% for o in shown.outcomes %}{% set _ = outcome_map.update({o.objective_id: o}) %}{% endfor %}{% endif %}
 {% set live_states = ["ready", "in_use"] %}
+{# What is booting, said in the platform's terms: the site's golden image is a Windows
+   build, so "waiting for Windows" was the copy for a Linux container too, and read as
+   the wrong machine being started. #}
+{% set platform_name = workload.label if workload else ("a Linux machine" if scenario.is_linux else "Windows") %}
 
 {% block content %}
 <div class="session-head">
@@ -27,7 +31,7 @@
   <div class="card notice">
     <h2>Preparing your machine</h2>
     <p>
-      Copying the scenario image and waiting for Windows to come up. This takes
+      Copying the scenario image and waiting for {{ platform_name }} to come up. This takes
       {% if state == "allocating" %}about a minute on a warm pool, up to two on a cold clone{% else %}a few seconds{% endif %}.
       This page will refresh itself.
     </p>
@@ -54,6 +58,20 @@
   <div class="col-console">
     <div class="card">
       <h2>Machine</h2>
+      {# The address is on the page for every scenario, the Linux ones included. Saying
+         "ask your instructor" made a student ask once per session for a string the
+         portal already holds, and left them with nothing when nobody was watching. #}
+      {% if address.host %}
+        <table class="kv">
+          <tr>
+            <th>{{ address.transport or "Address" }}</th>
+            <td><code>{{ address.target }}</code></td>
+          </tr>
+          {% if address.user %}<tr><th>Account</th><td><code>{{ address.user }}</code></td></tr>{% endif %}
+        </table>
+      {% else %}
+        <p class="muted small">This machine's address appears here as soon as it has one.</p>
+      {% endif %}
       {% if console_refused %}
         {# The gateway has been asked and it refused the link we signed — the console
            would sit here blank, blaming the machine. Say what is actually wrong:
@@ -83,13 +101,13 @@
            console that does not apply. Say what this scenario actually is. #}
         <p class="muted">
           This scenario runs on a Linux machine, so there is no remote desktop to open here.
-          Work in a shell on the machine itself, as the briefing describes; your instructor can
-          give you the address for it.
+          Work in a shell on the machine itself, as the briefing describes — the address
+          above is the machine you are working on.
         </p>
       {% else %}
         <p class="muted">
           No browser console is configured (the instructor needs to set guac.base_url and
-          guac.secret_key). Your instructor can still hand you an RDP address.
+          guac.secret_key). The address above is still yours to connect to directly.
         </p>
       {% endif %}
     </div>

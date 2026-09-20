@@ -3,7 +3,8 @@ from __future__ import annotations
 import pytest
 
 from ontrak.demo import synthesise_ticket
-from ontrak.models import SessionState
+from ontrak.models import Session, SessionState
+from ontrak.portal.app import _machine_address
 from ontrak.tickets import WRITEUP_ACTION
 
 from .conftest import csrf, login
@@ -344,6 +345,93 @@ def test_end_session_destroys_the_vm(app_client):
     assert response.status_code == 200
     assert app.state.store.get_session(session.id).state is SessionState.DESTROYED
     assert not app.state.incus.exists(instance)
+
+
+# --------------------------------------------------------------------------- #
+# the machine's address, and ending from the list
+# --------------------------------------------------------------------------- #
+LINUX_SCENARIO = "linux-ownership-chown-repair"
+
+
+def test_the_session_page_always_carries_the_machine_address(app_client):
+    """The address is on the page, not something a student has to ask for."""
+    client, app = app_client
+    login(client, "alice")
+    client.post("/sessions/start", data={"scenario_id": SCENARIO, "csrf": csrf(client)})
+    session = provision(app)
+
+    page = client.get(f"/sessions/{session.id}").text
+    assert session.host_ip in page
+    assert f":{app.state.settings.guest.rdp_port}" in page
+    # The old copy sent the student to their instructor for a string the portal
+    # already held, which is one question per session and nothing at all when no
+    # instructor is watching.
+    assert "give you the address" not in page
+    assert "hand you an RDP address" not in page
+
+
+def test_a_linux_machine_says_how_it_is_reached(app_client):
+    """A Linux guest is a shell, so the page says which shell and where."""
+    _, app = app_client
+    settings = app.state.settings
+    scenario = app.state.repo.get(LINUX_SCENARIO)
+    session = Session(id=1, student="alice", scenario_id=LINUX_SCENARIO, host_ip="10.20.0.9")
+
+    # Default posture: the image runs no sshd, so the shell is the guest's own
+    # console and the address is all there is to hand over.
+    settings.guac.linux_ssh = False
+    address = _machine_address(settings, scenario, session)
+    assert (address["transport"], address["target"]) == ("shell", "10.20.0.9")
+
+    # With an sshd in the image, the reachable form is the command itself.
+    settings.guac.linux_ssh = True
+    address = _machine_address(settings, scenario, session)
+    assert address["transport"] == "SSH"
+    assert address["target"] == f"ssh root@10.20.0.9 -p {settings.guest.ssh_port}"
+
+    windows = app.state.repo.get(SCENARIO)
+    address = _machine_address(settings, windows, session)
+    assert address["transport"] == "RDP"
+    assert address["target"] == f"10.20.0.9:{settings.guest.rdp_port}"
+
+    # Nothing to show until the guest has an address of its own.
+    empty = Session(id=2, student="alice", scenario_id=LINUX_SCENARIO)
+    assert _machine_address(settings, scenario, empty)["host"] == ""
+
+
+def test_the_provisioning_copy_names_the_platform_being_started(app_client):
+    """The site's golden image is a Windows build; a Linux session is not that."""
+    client, app = app_client
+    login(client, "alice")
+    # create_session does not provision, so the wait card is what renders.
+    session = app.state.manager.create_session("alice", LINUX_SCENARIO)
+
+    page = client.get(f"/sessions/{session.id}").text
+    assert "Preparing your machine" in page
+    # The platform the session is actually built for, not the site's Windows golden
+    # image - which is what the copy used to name for every scenario.
+    label = app.state.catalog.get(session.workload).label
+    assert f"waiting for {label} to come up" in page
+    assert "waiting for Windows to come up" not in page
+
+
+def test_the_dashboard_ends_a_session(app_client):
+    """Ending belongs on the list of machines, not behind a page load each."""
+    client, app = app_client
+    login(client, "alice")
+    client.post("/sessions/start", data={"scenario_id": SCENARIO, "csrf": csrf(client)})
+    session = provision(app)
+    instance = session.instance
+
+    page = client.get("/dashboard").text
+    assert f'action="/sessions/{session.id}/end"' in page
+    assert session.host_ip in page  # the list answers "where is my machine"
+
+    client.post(f"/sessions/{session.id}/end", data={"csrf": csrf(client)})
+    assert app.state.store.get_session(session.id).state is SessionState.DESTROYED
+    assert not app.state.incus.exists(instance)
+    # And the offer goes away with the machine.
+    assert f'action="/sessions/{session.id}/end"' not in client.get("/dashboard").text
 
 
 # --------------------------------------------------------------------------- #

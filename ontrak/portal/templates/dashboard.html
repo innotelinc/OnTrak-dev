@@ -48,7 +48,7 @@
   <h2>Your sessions</h2>
   <table>
     <thead>
-      <tr><th>#</th><th>Ticket</th><th>Platform</th><th>State</th><th>Result</th><th>Time left</th><th></th></tr>
+      <tr><th>#</th><th>Ticket</th><th>Platform</th><th>Machine</th><th>State</th><th>Result</th><th>Time left</th><th></th></tr>
     </thead>
     <tbody>
     {% for s in sessions %}
@@ -56,6 +56,10 @@
         <td>{{ s.id }}</td>
         <td>{{ s.scenario_id }}</td>
         <td>{{ s.workload or "default" }}</td>
+        {# The address, here as well: the list is where a student looks to find their
+           own machine, and having to open a session to learn where it is made the
+           list a set of links rather than an answer. #}
+        <td class="muted small">{{ s.instance or "—" }}{% if s.host_ip %}<br><code>{{ s.host_ip }}</code>{% endif %}</td>
         <td><span class="badge state-{{ s.state.value }}">{{ s.state.value }}</span></td>
         <td>
           {% if s.state.value in ["passed", "failed"] %}
@@ -68,7 +72,19 @@
           {% set secs = s.seconds_remaining() %}
           {{ (secs // 60) if secs is not none else "—" }} min
         </td>
-        <td><a class="button" href="/sessions/{{ s.id }}">{{ "Review" if s.state.value in ["passed", "failed"] else "Open" }}</a></td>
+        <td class="row-actions">
+          <a class="button" href="/sessions/{{ s.id }}">{{ "Review" if s.state.value in ["passed", "failed"] else "Open" }}</a>
+          {# Ending belongs here too. The only way out used to be to open the session, scroll
+             to the bottom and end it there, which is a page load per abandoned machine - and
+             a machine left running is the thing this list exists to show. #}
+          {% if s.id in live_ids %}
+          <form method="post" action="/sessions/{{ s.id }}/end" class="inline"
+                onsubmit="return confirm('End session #{{ s.id }}? The machine is destroyed and nothing is graded.')">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" class="danger">End</button>
+          </form>
+          {% endif %}
+        </td>
       </tr>
     {% endfor %}
     </tbody>
