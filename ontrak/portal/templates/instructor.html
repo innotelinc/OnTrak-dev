@@ -49,7 +49,7 @@
   <h2>Live sessions</h2>
   <table>
     <thead>
-      <tr><th>#</th><th>Student</th><th>Scenario</th><th>State</th><th>Instance</th><th>IP</th>
+      <tr><th>#</th><th>Student</th><th>Scenario</th><th>State</th><th>Instance</th><th>Address</th>
           <th>Checks</th><th>Best</th><th>Left</th><th>Actions</th></tr>
     </thead>
     <tbody>
@@ -61,7 +61,14 @@
         <td>{{ s.scenario_id }}</td>
         <td><span class="badge state-{{ s.state.value }}">{{ s.state.value }}</span></td>
         <td><code>{{ s.instance or "-" }}</code></td>
-        <td>{{ s.host_ip or "-" }}</td>
+        <td class="muted small">
+          {# The address as it is actually used - the SSH command, the RDP target - rather
+             than the bare IP, which is not enough to reach a machine on either platform. #}
+          {% if row.address.get("target") %}
+            <code>{{ row.address["target"] }}</code>
+            {% if row.address.get("user") %}<br>as <code>{{ row.address["user"] }}</code>{% endif %}
+          {% else %}-{% endif %}
+        </td>
         <td>{{ s.checks_run }}</td>
         <td>{{ "%.0f%%"|format(s.best_score) }}</td>
         <td>{{ (row.remaining // 60) if row.remaining is not none else "-" }}m</td>

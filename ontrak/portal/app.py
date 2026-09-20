@@ -947,12 +947,20 @@ def create_app(
         rows = []
         for session in sessions:
             report = store.latest_report(session.id)
+            try:
+                scenario = request.app.state.repo.get(session.scenario_id)
+            except ScenarioError:
+                scenario = None
             rows.append(
                 {
                     "session": session,
                     "report": report,
                     "remaining": session.seconds_remaining(),
                     "console": bool(_session_link(request, session)),
+                    # The same connection detail the student is shown, so an instructor
+                    # reading this list can reach a machine without opening the session
+                    # first - which is the whole reason the list is here.
+                    "address": _machine_address(settings, scenario, session) if scenario else {},
                 }
             )
         # Both of these shell out to Incus, and this page has to render without it:

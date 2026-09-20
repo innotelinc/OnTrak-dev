@@ -434,6 +434,18 @@ def test_the_dashboard_ends_a_session(app_client):
     assert f'action="/sessions/{session.id}/end"' not in client.get("/dashboard").text
 
 
+def test_the_instructor_list_carries_the_connection_detail(app_client):
+    """An instructor reaches a machine from the list, so the address is on it."""
+    client, app = app_client
+    session = app.state.manager.allocate("bob", SCENARIO)
+    login(client, "teacher")
+
+    page = client.get("/instructor").text
+    # The target as it is used, not the bare IP: a Windows guest is `<ip>:<rdp_port>`
+    # and a Linux one is the ssh command or the address itself.
+    assert f"{session.host_ip}:{app.state.settings.guest.rdp_port}" in page
+
+
 # --------------------------------------------------------------------------- #
 # instructor
 # --------------------------------------------------------------------------- #
