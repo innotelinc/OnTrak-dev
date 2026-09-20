@@ -143,7 +143,8 @@ three ways to reach a hypervisor, and the volume that holds the results.
 ### Before (10 minutes)
 
 ```bash
-make doctor                                                    # host healthy?
+make doctor                                                    # host healthy? (incus, secrets, console gateway key)
+
 .venv/bin/ontrak scenario validate                           # catalogue healthy?
 .venv/bin/ontrak template build --all                        # after any scenario edit
 .venv/bin/ontrak pool prewarm --scenario net-dns-failure --count 30
@@ -245,6 +246,7 @@ for the whole class: a cluster does not make a cold Windows boot faster.
 | Template build fails with "did not report ONTRAK-SETUP-OK" | the setup script threw | The error includes the output tail; run the VM manually and execute `setup.ps1` to see the full error |
 | "template is missing snapshot clean" | scenario edited, template not rebuilt | `ontrak template build <scenario> --force` |
 | Guacamole shows "connection failed" | target 3389 unreachable from guacd, or wrong credentials | `ontrak session console <id>` to inspect; confirm the VM answers on 3389 from the control node; check `guest.rdp_port` |
+| Console loads but every session is refused ("Permission denied"), or the iframe never opens | the gateway signs off on a different `JSON_SECRET_KEY` than the portal's `guac.secret_key`, or its `guacamole-auth-json` extension is not enabled | `ontrak doctor` probes this directly and now **fails** on it (it posts a payload signed with `guac.secret_key` to `<guac.base_url>/api/tokens`). Make `JSON_SECRET_KEY` equal `ONTRAK_GUAC__SECRET_KEY` and recreate the gateway: `make console-recreate` (or `docker compose up -d --force-recreate guacamole`). A stack started before the key was set keeps the empty one until it is recreated. The student's page says so too instead of showing an empty console |
 | Console iframe blank | `guac.base_url` is not the URL the student's browser uses, or the page is HTTP while Guacamole is HTTPS | Set `guac.base_url` to the browser-visible HTTPS URL and put a TLS proxy in front |
 | Console says "the remote desktop server is currently unreachable" | the console is an **RDP** connection pointed at a Linux *container*, which answers no RDP at all | Turn on `guac.linux_ssh` and rebuild that scenario's template: the build installs and configures `sshd` (see below), and the console becomes a shell |
 | Console is refused the same way **after** turning on `guac.linux_ssh` | the template predates the setting | Templates are snapshots: re-run `ontrak template build <scenario> --force` for each Linux scenario, or `infra/build-templates.sh`. A template built before the setting existed has no sshd in it |

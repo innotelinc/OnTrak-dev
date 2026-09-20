@@ -54,6 +54,20 @@
   <div class="col-console">
     <div class="card">
       <h2>Machine</h2>
+      {% if console_refused %}
+        {# The gateway has been asked and it refused the link we signed — the console
+           would sit here blank, blaming the machine. Say what is actually wrong:
+           nothing the student can do, and one value for an operator to fix. #}
+        <div class="card error">
+          <h2>The console cannot open right now</h2>
+          <p>
+            Your machine is running — this is the lab's console gateway refusing the
+            connection, not a fault in your virtual machine.
+          </p>
+          <p class="muted small">{{ console_refused }}</p>
+          <p class="muted small">Tell your instructor; this is fixed by an operator, not by you.</p>
+        </div>
+      {% endif %}
       {% if console_url and state in live_states %}
         <iframe id="console" src="{{ console_url }}" title="Remote session" allow="clipboard-read; clipboard-write"></iframe>
         <p class="muted small">
@@ -136,9 +150,12 @@
           </label>
         {% endfor %}
         <div class="actions">
-          <button type="submit" name="action" value="save" class="secondary">Save draft</button>
-          <button type="submit" name="action" value="preview" class="secondary">Preview mark</button>
-          <button type="submit" name="action" value="complete" class="primary"
+          {# ontrak_writeup, not `action`: a ticket may have a field of its own called
+             action, and both would be submitted under the same name (see
+             tickets.WRITEUP_ACTION). #}
+          <button type="submit" name="ontrak_writeup" value="save" class="secondary">Save draft</button>
+          <button type="submit" name="ontrak_writeup" value="preview" class="secondary">Preview mark</button>
+          <button type="submit" name="ontrak_writeup" value="complete" class="primary"
                   onclick="return confirm('Hand this session in? The machine is graded and destroyed afterwards.')">
             Complete &amp; End
           </button>

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import random
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from .guest import BaseDriver, CommandResult
 from .memory import InMemoryIncus
 from .models import SessionState
 from .scenarios import JSON_BEGIN, JSON_END, SETUP_OK_MARKER, ScenarioRepository
-from .sessions import SessionManager
+from .sessions import CONSOLE_SETUP_MARKER, SessionManager
 from .store import Store
 
 DEMO_STUDENTS = ["student1", "student2", "student3", "student4", "student5", "student6"]
@@ -107,6 +108,12 @@ class DemoDriver(BaseDriver):
             return CommandResult(True, 0, f"demo setup applied\n{SETUP_OK_MARKER}")
         if "check.sh" in script:
             return self._report(script)
+        if CONSOLE_SETUP_MARKER in script:
+            # `guac.linux_ssh`: the template build installs an sshd in a Linux guest
+            # and refuses to snapshot one whose console would lie. The simulated guest
+            # has one already, and standing in for the installer is what lets the demo
+            # run with the setting on instead of dying at startup.
+            return CommandResult(True, 0, f"demo console transport installed\n{CONSOLE_SETUP_MARKER}")
         return CommandResult(True, 0, "ok")
 
     def run_script_file(
@@ -162,6 +169,14 @@ def build_demo_environment(
     if state_dir is not None:
         settings.paths.state = str(state_dir)
     settings.demo.enabled = True
+    # "No secrets" is demo mode's promise, and it holds for the hypervisor and the
+    # guest — but the portal still signs its own cookies (the session cookie and the
+    # flash that carries a message between pages). With no key, signing raises and
+    # every sign-in is a 500 naming a setting the demo told the operator not to set,
+    # so mint an ephemeral one. It only has to outlive this process, and it never
+    # leaves it: a fresh key per run is fine when the run is the whole lifetime.
+    if not settings.portal.secret:
+        settings.portal.secret = secrets.token_urlsafe(32)
     if success_rate is not None:
         settings.demo.success_rate = float(success_rate)
     if students is not None:
@@ -269,6 +284,23 @@ def synthesise_ticket(form) -> dict[str, str]:
             text = f"{text}{filler}" if not text.endswith(filler.strip()) else f"{text} Confirmed."
         values[field.id] = text
     return values
+
+
+def seed_range(env: DemoEnvironment) -> dict[str, str]:
+    """Make every scenario startable, the way ``run_demo`` makes the class's own.
+
+    The portal refuses a scenario whose template has no ``clean`` snapshot and whose
+    pool is empty (see :meth:`SessionManager.scenario_availability`) — which is every
+    scenario on a freshly built demo environment, so a student signing in to
+    ``ontrak demo serve`` could not start anything at all. Building the templates up
+    front is what keeps the demo portal honest about the flow it exists to show.
+
+    Goes through :meth:`SessionManager.build_templates` rather than
+    :func:`seed_pool` so one pair the simulated guest cannot build is reported as
+    that scenario's own failure — which the dashboard then explains — instead of
+    taking the whole portal down before it serves a page.
+    """
+    return env.manager.build_templates([s.id for s in env.repository.list()])
 
 
 def seed_pool(

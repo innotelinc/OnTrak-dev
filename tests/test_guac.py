@@ -232,6 +232,83 @@ def test_a_linux_guest_gets_ssh_when_the_image_runs_sshd(settings):
     assert "resize-method" not in connection["parameters"]
 
 
+def test_a_linux_console_logs_in_as_the_account_the_template_provisioned(settings):
+    """A real Linux session carries the Windows RDP user; the console must not use it.
+
+    `create_session` sets ``rdp_user = guest.user`` (the training account on a Windows
+    guest), and the old code preferred it here too — but the SSH console transport a
+    Linux template is built with sets the password for ``guest.linux_user`` and nothing
+    else. So every Linux console asked guacd to log in as an account the image did not
+    have, and the shell refused: a console that never opened, on a scenario that was
+    fine. The test above passes ``rdp_user=""``, which is why it never caught this.
+    """
+    settings.guac.linux_ssh = True
+    settings.guest.user = "student"
+    settings.guest.password = "TrainMe!12345"
+    assert settings.guest.linux_user == "root"  # the shipped default
+    scenario = _Scenario("linux")
+    session = make_session(rdp_user="student", rdp_password="TrainMe!12345")
+    payload = guac.build_payload(settings, session, scenario)
+    connection = next(iter(payload["connections"].values()))
+    assert connection["parameters"]["username"] == "root"
+    assert connection["parameters"]["password"] == "TrainMe!12345"
+    # ...and the RDP half still gets the training account.
+    rdp = guac.rdp_parameters(settings, session)
+    assert rdp["username"] == "student"
+
+
+def test_the_gateway_probe_signs_with_the_portals_own_key(settings):
+    """The probe must test the agreement, not merely reach the gateway.
+
+    It sends a payload signed with `guac.secret_key` — the same thing a student's link
+    carries — so a gateway that accepts it is a gateway that will open the console.
+    """
+    sent = {}
+
+    def post(url, fields, timeout):
+        sent.update(url=url, fields=fields, timeout=timeout)
+        return 200, '{"authToken":"abc","dataSource":"json"}'
+
+    state, detail = guac.probe_gateway(settings, post=post)
+    assert state == "ok", detail
+    assert sent["url"].endswith("/guacamole/api/tokens")
+    payload = guac.decode_payload(sent["fields"]["data"], settings.guac.secret_bytes())
+    assert payload["connections"]["OnTrak doctor"]["protocol"] == "rdp"
+
+
+def test_the_gateway_probe_names_a_key_mismatch(settings):
+    """A refused payload is the "console never opens" state, and it must be blocking.
+
+    Guacamole answers every student with this exact response when JSON_SECRET_KEY and
+    guac.secret_key disagree — or when the JSON extension is off — and the portal has
+    no way to notice, because it never sees the gateway's answer.
+    """
+    state, detail = guac.probe_gateway(
+        settings, post=lambda url, fields, timeout: (403, '{"message":"Permission denied."}')
+    )
+    assert state == "refused"
+    assert "JSON_SECRET_KEY" in detail
+    assert "console never opens" in detail
+
+
+def test_the_gateway_probe_warns_rather_than_fails_when_nothing_answers(settings):
+    """Split-horizon DNS is normal: the browser's URL need not resolve on the host."""
+
+    def dead(url, fields, timeout):
+        raise OSError("name or service not known")
+
+    state, detail = guac.probe_gateway(settings, post=dead)
+    assert state == "unreachable"
+    assert "could not reach" in detail
+
+
+def test_the_gateway_probe_skips_when_there_is_no_console(settings):
+    settings.guac.base_url = ""
+    state, detail = guac.probe_gateway(settings, post=lambda *a: (_ for _ in ()).throw(AssertionError()))
+    assert state == "skipped"
+    assert "guac.base_url" in detail
+
+
 def test_an_unknown_scenario_still_gets_rdp(settings):
     # No scenario means the payload cannot be classified; RDP is the pre-existing
     # behaviour and the safer guess (a Windows VM is what the pool holds).

@@ -431,6 +431,16 @@ class SessionManager:
         self._unavailable_cache = (now, dict(reasons))
         return reasons
 
+    def _forget_unavailable(self) -> None:
+        """Drop the cached unavailability map after the pool or templates change.
+
+        The cache exists so the dashboard does not pay for an Incus round trip per
+        scenario on every render. Without this it outlives the change that fixes it:
+        an instructor who has just built the template still reads "not available on
+        this range yet" for the rest of the TTL, on the page they are looking at.
+        """
+        self._unavailable_cache = None
+
     def build_templates(
         self, ids: list[str] | None = None, force: bool = False, workloads: list[str] | None = None
     ) -> dict[str, str]:
@@ -455,6 +465,7 @@ class SessionManager:
             except (SessionError, IncusError, GuestError) as exc:
                 results[key] = f"failed: {exc}"
                 self.store.log_event("template_failed", f"{key}: {exc}")
+        self._forget_unavailable()
         return results
 
     def ensure_template(self, scenario_id: str, force: bool = False, workload: str = "") -> str:
@@ -547,6 +558,7 @@ class SessionManager:
                 self._require_incus().stop_instance(name, force=True, timeout=60)
 
         incus.create_snapshot(name, POOL_SNAPSHOT)
+        self._forget_unavailable()
         label = f"{scenario_id}@{workload}" if workload else scenario_id
         self.store.log_event("template_built", f"{label} -> {name}/{POOL_SNAPSHOT}")
         return name
@@ -801,6 +813,7 @@ class SessionManager:
         if created:
             label = f"{scenario_id}@{workload}" if workload else scenario_id
             self.store.log_event("prewarmed", f"{label}: {created} VM(s)")
+        self._forget_unavailable()
         return created
 
     def _provision_pool_instance(self, scenario_id: str, name: str, workload: str = "") -> str:

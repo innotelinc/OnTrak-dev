@@ -4,6 +4,7 @@ import pytest
 
 from ontrak.demo import synthesise_ticket
 from ontrak.models import SessionState
+from ontrak.tickets import WRITEUP_ACTION
 
 from .conftest import csrf, login
 
@@ -115,11 +116,13 @@ def test_full_student_flow(app_client):
     assert "not recorded" in checked.text
 
     # Complete & End grades once, stores that result, and destroys the machine. The
-    # write-up is part of the submission, so it is filled in like a student would.
+    # write-up is part of the submission, so it is filled in like a student would —
+    # including the submitting control the buttons carry (the ticket's own `action`
+    # field is data, not a command: see tickets.WRITEUP_ACTION).
     form = app.state.manager.ticket_form_for(session)
     completed = client.post(
         f"/sessions/{session.id}/complete",
-        data={**synthesise_ticket(form), "csrf": csrf(client)},
+        data={**synthesise_ticket(form), WRITEUP_ACTION: "complete", "csrf": csrf(client)},
     )
     assert completed.status_code == 200
     report = app.state.store.latest_report(session.id)
@@ -201,6 +204,114 @@ def test_reset_hands_over_a_clean_machine(app_client):
     assert reloaded.instance == instance
     assert app.state.incus.exists(instance)
     assert app.state.incus.instance_status(instance) == "RUNNING"
+
+
+def test_saving_the_writeup_does_not_hand_the_session_in(app_client):
+    """The ticket's own ``action`` field must not shadow the submit button.
+
+    Ten of the shipped scenarios ask "what you changed" as a field called ``action``,
+    and the write-up fields share one HTML form with the three submitting buttons.
+    With the control named ``action`` too, the field was serialised first, so the
+    handler read the student's prose, matched neither save nor preview, and fell
+    through to Complete & End: clicking *Save draft* graded the machine and destroyed
+    it. The regression is invisible to a test that only posts a full submission.
+    """
+    client, app = app_client
+    login(client, "alice")
+    client.post("/sessions/start", data={"scenario_id": SCENARIO, "csrf": csrf(client)})
+    session = provision(app)
+    instance = session.instance
+
+    saved = client.post(
+        f"/sessions/{session.id}/complete",
+        data={"action": "Edited the resolver config", WRITEUP_ACTION: "save", "csrf": csrf(client)},
+    )
+    assert "saved as a draft" in saved.text.lower()
+    still = app.state.store.get_session(session.id)
+    assert still.state.is_live, f"saving a draft closed the session: {still.state}"
+    assert app.state.store.latest_report(session.id) is None
+    assert app.state.incus.exists(instance)
+
+    previewed = client.post(
+        f"/sessions/{session.id}/complete",
+        data={"action": "Edited the resolver config", WRITEUP_ACTION: "preview", "csrf": csrf(client)},
+    )
+    assert "preview" in previewed.text.lower()
+    assert app.state.store.get_session(session.id).state.is_live
+    assert app.state.incus.exists(instance)
+
+
+def test_a_submission_with_no_control_button_is_not_a_completion(app_client):
+    """A POST that arrives without the submitting control must not grade and destroy.
+
+    Browsers always send the button that was clicked; a hand-built request does not.
+    Defaulting that case to Complete & End made an accidental submission fatal, so it
+    defaults to the draft save instead.
+    """
+    client, app = app_client
+    login(client, "alice")
+    client.post("/sessions/start", data={"scenario_id": SCENARIO, "csrf": csrf(client)})
+    session = provision(app)
+    instance = session.instance
+
+    response = client.post(f"/sessions/{session.id}/complete", data={"csrf": csrf(client)})
+    assert "saved as a draft" in response.text.lower()
+    assert app.state.store.latest_report(session.id) is None
+    assert app.state.incus.exists(instance)
+    assert app.state.store.get_session(session.id).state.is_live
+
+
+def test_a_refused_console_key_is_explained_to_the_student(app_client, monkeypatch):
+    """A gateway that refuses our key must not present as a blank iframe.
+
+    The portal signs every console link and never sees the gateway's answer, so a
+    gateway with a different key — or one without the JSON auth extension — left the
+    student looking at an empty frame, and nothing in either log said why. The page
+    says so now, in words a student can hand to an instructor.
+    """
+    from ontrak.portal import app as portal_app
+
+    client, app = app_client
+    login(client, "alice")
+    client.post("/sessions/start", data={"scenario_id": SCENARIO, "csrf": csrf(client)})
+    session = provision(app)
+
+    monkeypatch.setattr(
+        portal_app.guac,
+        "probe_gateway",
+        lambda settings, **kwargs: (
+            "refused",
+            "the console gateway rejected a payload signed with guac.secret_key "
+            "(HTTP 403). Its JSON_SECRET_KEY differs from this key",
+        ),
+    )
+    # The page render that followed the POST already cached a verdict; make this
+    # render ask again rather than reusing it.
+    app.state.console_gateway = None
+
+    page = client.get(f"/sessions/{session.id}")
+    assert "The console cannot open right now" in page.text
+    assert "JSON_SECRET_KEY" in page.text
+    assert "not a fault in your virtual machine" in page.text
+    # The console is still offered: a stale verdict must not remove a working one.
+    assert "guac.test" in page.text
+
+
+def test_a_healthy_console_key_shows_no_warning(app_client, monkeypatch):
+    from ontrak.portal import app as portal_app
+
+    client, app = app_client
+    login(client, "alice")
+    client.post("/sessions/start", data={"scenario_id": SCENARIO, "csrf": csrf(client)})
+    session = provision(app)
+    monkeypatch.setattr(
+        portal_app.guac, "probe_gateway", lambda settings, **kwargs: ("ok", "accepted")
+    )
+    app.state.console_gateway = None
+
+    page = client.get(f"/sessions/{session.id}")
+    assert "The console cannot open right now" not in page.text
+    assert "guac.test" in page.text
 
 
 def test_a_student_cannot_open_someone_elses_session(app_client):

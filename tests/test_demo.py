@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 
 from ontrak import selection
+from ontrak.config import load_settings
 from ontrak.demo import (
     DEMO_INSTRUCTOR,
     DemoDriver,
@@ -25,10 +26,22 @@ def env(tmp_path):
 
 
 def test_demo_needs_no_secrets(env):
-    """Demo mode is the one mode that runs with an empty guest password and no keys."""
+    """Demo mode never demands a secret from the operator.
+
+    The guest password stays empty and there is no console key — but the portal still
+    signs its own cookies, so it mints an ephemeral key rather than failing every
+    sign-in with "portal.secret must be set". The point of the assertion is that the
+    operator supplied nothing; where the key came from is demo's own business.
+    """
     assert env.settings.demo.enabled
     assert env.settings.guest.password == ""
-    assert env.settings.portal.secret == ""
+    assert env.settings.portal.secret, "demo must mint its own cookie key"
+    assert env.settings.guac.secret_key == ""
+
+    # And the key is fresh per environment: nothing is shared between runs, because
+    # nothing about a demo outlives one.
+    other = build_demo_environment(settings=load_settings(overrides={"demo": {"enabled": True}}))
+    assert other.settings.portal.secret != env.settings.portal.secret
 
 
 def test_demo_uses_an_in_memory_hypervisor(env):
@@ -93,6 +106,95 @@ def test_seed_pool_builds_a_template_per_scenario_and_platform(tmp_path):
     assert warm, "the requested scenarios should have been warmed"
     assert all(count == 2 for count in warm.values())
     assert set(warm) < set(built), "only the nominated scenarios should be warm"
+
+
+def test_seed_range_makes_every_scenario_startable(tmp_path):
+    """`ontrak demo serve` has to hand a student a machine, not a refusal.
+
+    The portal refuses a scenario with no template and no pooled VM, which is every
+    scenario on a fresh demo environment — so without seeding, the demo portal's
+    whole student flow dead-ends at "not available on this range yet".
+    """
+    from ontrak.demo import seed_range
+
+    env = build_demo_environment(state_dir=tmp_path / "range", success_rate=1.0)
+    assert env.manager.unavailable_scenarios(), "nothing is startable before seeding"
+    seed_range(env)
+    assert env.manager.unavailable_scenarios() == {}
+
+
+def test_demo_serve_signs_in_without_any_secrets(tmp_path):
+    """The documented first run (`make demo-serve`) has no .env at all.
+
+    Signing in used to 500: the portal signs its session and flash cookies, and demo
+    mode — which promises no secrets — left the key empty. This is that flow, with no
+    injected hypervisor, so it takes the same branch `ontrak demo serve` does.
+    """
+    from fastapi.testclient import TestClient
+
+    from ontrak.portal.app import create_app
+
+    settings = load_settings(
+        overrides={"paths": {"state": str(tmp_path / "serve")}, "demo": {"enabled": True}}
+    )
+    settings.portal.secret = ""
+    app = create_app(settings)
+    with TestClient(app) as client:
+        entered = client.get("/demo/login/student1", follow_redirects=False)
+        assert entered.status_code == 303
+        assert entered.headers["location"] == "/dashboard"
+        assert client.get("/dashboard").status_code == 200
+        # And a scenario can actually be started, which is what the demo is for.
+        started = client.post(
+            "/sessions/start",
+            data={"scenario_id": "auto", "time_limit": "45", "csrf": client.cookies.get("ontrak_csrf", "")},
+            follow_redirects=False,
+        )
+        assert started.status_code == 303
+        assert "/sessions/" in started.headers["location"]
+
+
+def test_demo_serve_drives_a_linux_scenario_too(tmp_path):
+    """The portal must hand the demo driver to the *shell* transport as well.
+
+    Linux scenarios are driven through a second driver, and `create_app` used to
+    build the SessionManager without it — so a Linux session in demo mode cloned fine
+    and then graded through the real Incus-agent driver, which has no guest to answer:
+    "no grading payload found" where a score should be. The demo's whole point is that
+    the flow works with no hypervisor, so the demo driver has to answer for both.
+    """
+    from fastapi.testclient import TestClient
+
+    from ontrak.demo import synthesise_ticket
+    from ontrak.portal.app import create_app
+
+    settings = load_settings(
+        overrides={"paths": {"state": str(tmp_path / "linux")}, "demo": {"enabled": True}}
+    )
+    settings.demo.success_rate = 1.0
+    app = create_app(settings)
+    with TestClient(app) as client:
+        client.get("/login")
+        client.get("/demo/login/student1")  # follows to /dashboard, minting the CSRF cookie
+        client.post(
+            "/sessions/start",
+            data={
+                "scenario_id": "linux-dir-tree-build",
+                "workload": "ubuntu-24.04",
+                "csrf": client.cookies.get("ontrak_csrf", ""),
+            },
+        )
+        session = app.state.manager.provision(app.state.store.live_sessions_for("student1")[0])
+        assert session.state.is_usable, session.error
+
+        report = app.state.manager.run_checks(session)
+        assert report.error == ""
+        assert report.score == 100.0
+
+        values = synthesise_ticket(app.state.manager.ticket_form_for(session))
+        final = app.state.manager.complete(session, values=values)
+        assert final.error == ""
+        assert final.resolved is True
 
 
 def test_run_demo_completes_a_whole_class(tmp_path):

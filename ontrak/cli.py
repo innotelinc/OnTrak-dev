@@ -182,7 +182,17 @@ def cmd_doctor(args) -> int:
         server = (info.get("environment") or {}).get("server_version", "unknown")
         _say(OK, f"incus server {server} (remote: {settings.incus.remote})")
 
-        pools = client.run_json(["storage", "list", "--format=json"], timeout=30) if client else []
+        # Every read here is guarded: a daemon that is not running is a doctor finding,
+        # not the end of the report. Unguarded, the first IncusError aborted the whole
+        # run mid-section — so a host with a stopped daemon never reached the console,
+        # scenario or capacity checks, which are exactly the ones an operator on a
+        # half-built host needs to see.
+        try:
+            pools = client.run_json(["storage", "list", "--format=json"], timeout=30) if client else []
+        except IncusError as exc:
+            _say(FAIL, f"could not list storage pools: {exc}")
+            failures += 1
+            pools = []
         names = [p.get("name") for p in (pools or [])]
         if settings.incus.storage_pool in names:
             driver = next(
@@ -200,7 +210,13 @@ def cmd_doctor(args) -> int:
             _say(FAIL, f"storage pool {settings.incus.storage_pool!r} not found (have: {', '.join(names) or 'none'})")
             failures += 1
 
-        networks = [n.get("name") for n in (client.run_json(["network", "list", "--format=json"], timeout=30) or [])]
+        try:
+            listed = client.run_json(["network", "list", "--format=json"], timeout=30) or []
+        except IncusError as exc:
+            _say(FAIL, f"could not list networks: {exc}")
+            failures += 1
+            listed = []
+        networks = [n.get("name") for n in listed]
         if settings.incus.network in networks:
             _say(OK, f"network {settings.incus.network!r} exists")
         else:
@@ -225,7 +241,15 @@ def cmd_doctor(args) -> int:
             _say(FAIL, f"golden image {settings.incus.image_alias!r} missing — run infra/build-golden-image.sh")
             failures += 1
         rows = []
-        for row in ctx.manager.template_status() if ctx.incus else []:
+        try:
+            template_rows = ctx.manager.template_status() if ctx.incus else []
+        except IncusError as exc:
+            # Same rule as the pool and network reads above: a daemon that is down is
+            # one finding, not the end of the report.
+            _say(FAIL, f"could not read templates: {exc}")
+            failures += 1
+            template_rows = []
+        for row in template_rows:
             status = "ready" if row["ready"] else ("no clean snapshot" if row["exists"] else "missing")
             if not row["ready"]:
                 _say(WARN, f"template {row['name']} ({status}) — run `ontrak template build {row['scenario_id']}`")
@@ -261,6 +285,22 @@ def cmd_doctor(args) -> int:
         except ImportError:
             _say(FAIL, "guest.driver=winrm but pywinrm is not installed")
             failures += 1
+
+    print()
+    print("Console gateway")
+    # The one check that catches a silent console failure: the portal signs every
+    # console link, and a gateway with a different key refuses all of them while both
+    # sides look healthy. Everything else here passes in that state.
+    state, detail = guac.probe_gateway(settings)
+    if state == "ok":
+        _say(OK, detail)
+    elif state == "refused":
+        _say(FAIL, detail)
+        failures += 1
+    elif state == "unreachable":
+        _say(WARN, detail)
+    else:
+        _say(INFO, detail)
 
     print()
     print("Capacity")

@@ -317,3 +317,65 @@ jobs:
       - name: Clean up
         if: always()
         run: docker rm -f ontrak-ci || true
+
+  # The failure this job exists for is silent: a gateway whose JSON_SECRET_KEY does
+  # not match the portal's guac.secret_key (a stack recreated from an older .env, or a
+  # gateway deployed on its own) answers every student with "Permission denied", and
+  # the console iframe simply never opens. Both services look healthy and neither log
+  # says anything. `doctor` now asks the gateway directly, so a range that would fail
+  # a class fails here instead — with the real gateway image, doing the real signing.
+  console-gateway:
+    name: Console gateway key
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the portal image
+        run: docker build -t ontrak:ci .
+
+      - name: A matched key is accepted and a mismatched one is refused
+        run: |
+          set -euo pipefail
+          docker network create ontrak-console-ci
+          key="$(openssl rand -hex 16)"
+
+          # A gateway that really verifies the payload, signing with its own key.
+          # The same image the stack runs; guacd is not needed to answer a token.
+          docker run -d --name ontrak-console-ci-gateway --network ontrak-console-ci \
+            -e JSON_ENABLED=true -e JSON_SECRET_KEY="$key" guacamole/guacamole:1.6.0
+
+          # Wait for Tomcat to answer, through the image under test (python is there).
+          for _ in $(seq 1 45); do
+            if docker run --rm --network ontrak-console-ci ontrak:ci python3 -c \
+                 "import urllib.request; urllib.request.urlopen('http://ontrak-console-ci-gateway:8080/guacamole/', timeout=3)" \
+                 >/dev/null 2>&1; then break; fi
+            sleep 4
+          done
+
+          # Only the section is read: doctor exits non-zero on this runner for lack of
+          # a hypervisor, which is not what this job is about — so the pipeline is
+          # deliberately not allowed to fail the step on that exit code.
+          section() {
+            docker run --rm --network ontrak-console-ci \
+              -e ONTRAK_GUAC__SECRET_KEY="$1" \
+              -e ONTRAK_GUAC__BASE_URL=http://ontrak-console-ci-gateway:8080/guacamole/ \
+              ontrak:ci doctor 2>&1 | sed -n '/Console gateway/,/^$/p' || true
+          }
+
+          matched="$(section "$key")"
+          grep -q '\[  ok  \]' <<<"$matched" \
+            || { echo '::error::the console gateway key check did not accept a matching key'; echo "$matched"; exit 1; }
+          echo "$matched"
+
+          refused="$(section "$(openssl rand -hex 16)")"
+          grep -q '\[ FAIL \]' <<<"$refused" \
+            || { echo '::error::a console key the gateway refuses passed doctor'; echo "$refused"; exit 1; }
+          grep -q 'JSON_SECRET_KEY' <<<"$refused" \
+            || { echo '::error::the refusal does not name the value to fix'; echo "$refused"; exit 1; }
+          echo "$refused"
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f ontrak-console-ci-gateway || true
+          docker network rm ontrak-console-ci || true

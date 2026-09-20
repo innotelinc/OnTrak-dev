@@ -19,6 +19,7 @@ from ontrak.scenarios import ScenarioRepository
 from ontrak.store import Store
 from ontrak.tickets import (
     MAX_TICKET_WEIGHT,
+    WRITEUP_ACTION,
     TicketError,
     TicketField,
     blend,
@@ -107,6 +108,20 @@ def test_a_free_text_field_needs_a_rubric():
 def test_duplicate_field_ids_are_reported():
     form = form_with([simple_field(), simple_field()])
     assert any("duplicate field id" in problem for problem in validate_form(form))
+
+
+def test_a_field_id_may_not_take_a_portal_control_name():
+    """A ticket field that shares a control name would shadow the submit buttons.
+
+    The write-up's fields and its Save/Preview/Complete buttons are one HTML form, so
+    a field called the same thing as the control is submitted in the same slot — which
+    is how a field named ``action`` made *Save draft* submit the session.
+    """
+    form = form_with([simple_field(id=WRITEUP_ACTION)])
+    assert any("reserved" in problem for problem in validate_form(form))
+    assert any("reserved" in problem for problem in validate_form(form_with([simple_field(id="csrf")])))
+    # The name scenarios actually use is fine: only the portal's control is reserved.
+    assert validate_form(form_with([simple_field(id="action")])) == []
 
 
 def test_select_without_options_is_reported():

@@ -50,6 +50,19 @@ KINDS = ("text", "textarea", "select", "checkbox", "number")
 MAX_TICKET_WEIGHT = 60.0
 DEFAULT_TICKET_WEIGHT = 30.0
 
+# The name of the write-up form's submitting control. It is deliberately *not*
+# ``action``, which is what most scenarios call one of their own fields ("what you
+# changed"). The fields and the three buttons share one HTML form, and the fields
+# are serialised first, so with the control named ``action`` the value the handler
+# read was the student's own prose: it matched neither ``save`` nor ``preview``,
+# fell through to Complete & End, and clicking *Save draft* graded the machine and
+# destroyed it. A reserved name cannot be shadowed like that, and
+# :data:`RESERVED_FIELD_IDS` keeps a scenario from taking it.
+WRITEUP_ACTION = "ontrak_writeup"
+
+# Control names the portal's own forms use, which a ticket field may not take.
+RESERVED_FIELD_IDS = frozenset({WRITEUP_ACTION, "csrf"})
+
 _WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'./_-]*")
 
 
@@ -253,6 +266,12 @@ def validate_form(form: TicketForm | None, prefix: str = "[ticket]") -> list[str
         problems.append(f"{prefix} ticket.form.pass_score must be in (0, 100]")
     seen: set[str] = set()
     for fld in form.fields:
+        if fld.id in RESERVED_FIELD_IDS:
+            problems.append(
+                f"{prefix} field id {fld.id!r} is reserved by the portal's write-up form "
+                f"(reserved: {', '.join(sorted(RESERVED_FIELD_IDS))}); it would share the "
+                "form control the submit buttons use"
+            )
         if not re.fullmatch(r"[a-z0-9][a-z0-9_]*", fld.id or ""):
             problems.append(
                 f"{prefix} field id {fld.id!r} must be lowercase, dash/underscore separated"

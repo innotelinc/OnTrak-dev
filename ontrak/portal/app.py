@@ -18,6 +18,7 @@ import csv
 import io
 import secrets
 import threading
+import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
@@ -35,7 +36,7 @@ from ..models import SessionState
 from ..scenarios import ScenarioError, ScenarioRepository
 from ..sessions import SessionError, SessionManager
 from ..store import Store
-from ..tickets import missing_required
+from ..tickets import WRITEUP_ACTION, missing_required
 from ..tickets import render_feedback as ticket_feedback
 from .admin import AdminContext, register_admin_routes
 
@@ -43,6 +44,12 @@ HERE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
 CSRF_COOKIE = "ontrak_csrf"
 FLASH_COOKIE = "ontrak_flash"
+
+# How long a console-gateway verdict is reused. The check is one POST to the gateway,
+# and the answer only changes when an operator restarts it, so a page render must not
+# pay for it every time — but a minute is short enough that a fixed gateway stops
+# being reported almost immediately.
+CONSOLE_GATEWAY_TTL_SECONDS = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +199,24 @@ def _session_link(request: Request, session) -> str:
         return ""
 
 
+def _console_gateway_verdict(request: Request) -> tuple[str, str]:
+    """Cached ``(state, detail)`` for the console gateway's key agreement.
+
+    Why the portal asks at all: it signs every console link and never sees the
+    gateway's answer, so a gateway with a different key leaves the student staring at
+    an iframe that never opens, with nothing anywhere explaining it (see
+    :func:`guac.probe_gateway`). Asking here turns that into a sentence on the page.
+    """
+    state = request.app.state
+    now = time.monotonic()
+    cached = state.console_gateway
+    if cached is not None and now - cached[0] < CONSOLE_GATEWAY_TTL_SECONDS:
+        return cached[1]
+    verdict = guac.probe_gateway(_settings(request))
+    state.console_gateway = (now, verdict)
+    return verdict
+
+
 def _provision_async(request: Request, session_id: int) -> None:
     """Kick off provisioning in a daemon thread, at most once per session."""
     state = request.app.state
@@ -232,12 +257,23 @@ def create_app(
     catalog = Catalog(settings.catalog_dir)
     app.state.catalog = catalog
 
+    # The shell transport is a separate driver (Linux scenarios use it) and the demo
+    # one answers for both platforms; without threading it through, a demo Linux
+    # session is graded through the real Incus-agent driver and reports "no grading
+    # payload" instead of a score.
+    shell_driver = None
     if incus is None and driver is None and settings.demo.enabled:
         # Demo mode: no Incus, no Windows, no secrets. The whole portal still works,
         # which is what makes `ontrak demo serve` a two-second demo.
         env = demo.build_demo_environment(settings)
         demo.seed_accounts(env)
+        # Build the templates the demo range would have on a real host. Without
+        # them every scenario is "not available on this range yet" before a session
+        # row exists, so the student cannot start anything in the mode whose whole
+        # job is to show the student flow.
+        demo.seed_range(env)
         incus, driver = env.incus, env.driver
+        shell_driver = env.driver
         app.state.store = env.store
         app.state.repo = env.repository
         catalog = env.catalog
@@ -250,8 +286,11 @@ def create_app(
         repo=app.state.repo,
         incus=incus,
         driver=driver or build_driver(settings),
+        shell_driver=shell_driver,
         catalog=catalog,
     )
+    # ``(monotonic, (state, detail))`` from the last console-gateway probe, or None.
+    app.state.console_gateway: tuple[float, tuple[str, str]] | None = None
     app.state.provisioning = set()
     app.state.provision_lock = threading.Lock()
     # "Check my work" results are shown to the student but never persisted: the lab is
@@ -537,6 +576,16 @@ def create_app(
             ticket_rows = ticket_feedback(ticket_form, ticket_preview)
         else:
             ticket_rows = []
+        # The console link, plus the gateway's verdict on the key it was signed with.
+        # Only asked when there is a console to show, so the probe stays off every
+        # other page — and only reported when the gateway actually refused, because
+        # "unreachable" is normal from a host behind a public name.
+        console_url = _session_link(request, session)
+        console_refused = ""
+        if console_url:
+            state_name, detail = _console_gateway_verdict(request)
+            if state_name == "refused":
+                console_refused = detail
         return render(
             request,
             "session.html",
@@ -546,7 +595,8 @@ def create_app(
                 "scenario_public": scenario.public(session.hint_level),
                 "report": report,
                 "preview": preview,
-                "console_url": _session_link(request, session),
+                "console_url": console_url,
+                "console_refused": console_refused,
                 "events": store.events_for(session.id, limit=15) if session.id else [],
                 "states": SessionState,
                 "time_limits": settings.session.time_limit_choices,
@@ -628,7 +678,7 @@ def create_app(
             return redirect(f"/sessions/{session_id}", request, "This scenario has no ticket form.")
         values = {fld.id: str(form_data.get(fld.id) or "") for fld in ticket_form.fields}
         manager.save_ticket_draft(session, values)
-        action = str(form_data.get("action") or "save")
+        action = str(form_data.get(WRITEUP_ACTION) or "save")
         if action != "preview":
             return redirect(f"/sessions/{session_id}", request, "Ticket saved as a draft.")
         grade = manager.grade_ticket(session, values)
@@ -648,7 +698,9 @@ def create_app(
 
         The write-up lives in one HTML form with three submitting buttons (save,
         preview, hand in), because nested forms are not a thing and duplicating every
-        field for a second button would be worse. ``action`` decides which one it was.
+        field for a second button would be worse. ``ontrak_writeup`` decides which one
+        it was — not ``action``, which is a field many scenarios define themselves (see
+        ``tickets.WRITEUP_ACTION``).
         """
         form_data = await request.form()
         _check_csrf(request, str(form_data.get("csrf") or ""))
@@ -664,7 +716,11 @@ def create_app(
         values = None
         if ticket_form is not None:
             values = {fld.id: str(form_data.get(fld.id) or "") for fld in ticket_form.fields}
-            action = str(form_data.get("action") or "complete")
+            # Defaulting to the *non-destructive* action matters: a submission that
+            # arrives without the control (scripted, or a form that lost its button)
+            # must not grade and destroy the student's machine. The button is always
+            # sent by a browser; only a hand-built POST lacks it.
+            action = str(form_data.get(WRITEUP_ACTION) or "save")
             if action in {"save", "preview"}:
                 manager.save_ticket_draft(session, values)
                 if action == "save":
@@ -886,6 +942,16 @@ def create_app(
             except Exception as exc:  # noqa: BLE001 - the instructor page must still render
                 infra_errors.append(f"could not read the {label}: {exc}")
                 return []
+
+        # A console key the gateway refuses is an outage for every student in the
+        # class and is invisible from both ends: the portal signs correctly, the
+        # gateway says "Permission denied" to a link nobody kept. Report it where an
+        # instructor is already looking when the first student says the console is
+        # blank (the verdict is cached, so this is not a probe per render).
+        if settings.guac.secret_key:
+            state_name, detail = _console_gateway_verdict(request)
+            if state_name == "refused":
+                infra_errors.append(detail)
 
         return render(
             request,

@@ -23,6 +23,9 @@ import hashlib
 import hmac
 import json
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from urllib.parse import quote
 
 from .models import Session
@@ -30,6 +33,10 @@ from .scenarios import Scenario
 
 AES_BLOCK = 16
 SIGNATURE_LEN = 32
+
+# How long the gateway probe waits. Generous enough for a TLS handshake on a busy
+# host, short enough that `ontrak doctor` does not hang on a name that never answers.
+PROBE_TIMEOUT_SECONDS = 8.0
 
 
 class GuacError(RuntimeError):
@@ -143,8 +150,16 @@ def ssh_parameters(settings, session: Session) -> dict:
     params: dict[str, str] = {
         "hostname": session.host_ip,
         "port": str(settings.guest.ssh_port),
-        "username": session.rdp_user or settings.guest.linux_user,
-        "password": session.rdp_password or settings.guest.password,
+        # The *Linux* account, not the Windows one. `create_session` fills `rdp_user`
+        # with `guest.user` (the training account on a Windows guest), while the
+        # console transport a Linux template is built with sets the password for
+        # `guest.linux_user` (root by default) and nothing else. Borrowing `rdp_user`
+        # here pointed every Linux console at an account the image does not have, so
+        # guacd's login was refused and the student got a console that never opened.
+        "username": settings.guest.linux_user or "root",
+        # The password the transport baked into the image: `randomize_credentials`
+        # rotates a Windows local account only, so nothing else can move this.
+        "password": settings.guest.password,
         "color-depth": "32",
         "font-size": "14",
         "clipboard-encoding": "UTF-8",
@@ -215,6 +230,81 @@ def build_payload(settings, session: Session, scenario: Scenario | None = None, 
             }
         },
     }
+
+
+def _post_form(url: str, fields: dict[str, str], timeout: float) -> tuple[int, str]:
+    """POST an urlencoded form, exactly as the Guacamole webapp does for a token.
+
+    Kept separate from :func:`probe_gateway` so the interpretation below can be tested
+    against a stub, and so the one place that touches the network is this small.
+    """
+    body = urllib.parse.urlencode(fields).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/x-www-form-urlencoded"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - an operator-set URL
+            return int(response.status), response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), exc.read().decode("utf-8", "replace")
+
+
+def probe_gateway(settings, *, timeout: float = PROBE_TIMEOUT_SECONDS, post=None):
+    """Ask the console gateway whether it accepts a link we signed. ``(state, detail)``.
+
+    Googleable symptom this exists for: **the console iframe never opens**. The portal
+    signs every link with ``guac.secret_key`` and Guacamole verifies it with its own
+    ``JSON_SECRET_KEY``; when the two disagree — a stack recreated from an older `.env`,
+    or a gateway deployed on its own with a freshly generated key — Guacamole answers
+    *every* student with "Permission denied". The portal cannot see that: it hands over
+    a correctly-signed link, the iframe is blank, and nothing in either log says why.
+
+    States: ``ok`` (accepted), ``refused`` (reached, but rejected our key — a mismatch,
+    or the JSON auth extension is off), ``unreachable`` (no answer: split-horizon DNS
+    and a stopped gateway are both normal here, so this is a warning), and ``skipped``
+    (no console configured at all).
+    """
+    base = (settings.guac.base_url or "").strip()
+    if not base:
+        return "skipped", "guac.base_url is not set, so this range has no console to check"
+    try:
+        key = settings.guac.secret_bytes()
+    except Exception as exc:  # noqa: BLE001 - ConfigError's job is to be reported, not raised
+        return "skipped", f"guac.secret_key is unusable, so there is no console link to test: {exc}"
+
+    # A payload for a machine that does not have to exist: the gateway answers the
+    # *signature* question at token time and only dials the VM when the console opens.
+    payload = {
+        "username": "ontrak-doctor",
+        "expires": int((time.time() + 60) * 1000),
+        "connections": {
+            "OnTrak doctor": {
+                "id": "ontrak-doctor",
+                "protocol": "rdp",
+                "parameters": {"hostname": "127.0.0.1", "port": str(settings.guest.rdp_port)},
+            }
+        },
+    }
+    url = base if base.endswith("/") else f"{base}/"
+    url = f"{url}api/tokens"
+    sender = post or _post_form
+    try:
+        status, body = sender(url, {"data": encode_payload(payload, key)}, timeout)
+    except (OSError, ValueError) as exc:
+        return "unreachable", f"could not reach the console gateway at {base}: {exc}"
+
+    if status == 200 and "authToken" in body:
+        return "ok", f"the console gateway at {base} accepted a payload signed with guac.secret_key"
+    if status in (401, 403):
+        return "refused", (
+            f"the console gateway at {base} rejected a payload signed with guac.secret_key "
+            f"(HTTP {status}). Its JSON_SECRET_KEY differs from this key, or its JSON auth "
+            "extension is not enabled — so every student's console link is refused and the "
+            "console never opens. Make JSON_SECRET_KEY equal ONTRAK_GUAC__SECRET_KEY "
+            "(config: guac.secret_key) and recreate the gateway: "
+            "`docker compose up -d --force-recreate guacamole`"
+        )
+    return "unreachable", f"the console gateway at {base} answered HTTP {status}: {body[:200]}"
 
 
 def build_link(

@@ -20,7 +20,7 @@ REMOTE_OVERLAY := -f docker-compose.yml -f docker-compose.remote.yml
         catalog catalog-validate media-status media-fetch generate schedule \
         templates pool reap demo-serve host-image landing \
         build up up-remote down logs ps exec check-compose setup-log \
-        docker-demo docker-shell provision provision-plan
+        docker-demo docker-shell provision provision-plan console-recreate
 
 help: ## Show this help message
 	@echo "OnTrak — operator workflow"
@@ -76,6 +76,14 @@ up-remote: secrets ## Start the stack with no host hypervisor (remote cluster / 
 
 setup-log: ## Show what the first-run lab setup did (secrets, Incus on the host)
 	$(COMPOSE) logs lab-setup
+
+console-recreate: ## Recreate just the console gateway, so its JSON_SECRET_KEY matches .env
+	@# The failure this fixes is silent: a gateway created before the key existed (or
+	@# with an older one) refuses every console link with "Permission denied", the
+	@# iframe never opens, and both containers still report healthy. `make check`
+	@# reports it — this is the one-value fix, without restarting the portal mid-class.
+	$(COMPOSE) up -d --force-recreate guacamole
+	@echo "==> recreated; now confirm: make check   (or: make exec ARGS=doctor)"
 
 down: ## Stop the stack (keeps the state, media and secrets volumes)
 	$(COMPOSE) down
