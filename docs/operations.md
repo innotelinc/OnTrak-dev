@@ -261,6 +261,7 @@ for the whole class: a cluster does not make a cold Windows boot faster.
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | Session sits in `provisioning`, then `error` | guest transport never answered | Check `session.error` on the page, then `ONTRAK_INCUS__REMOTE=... incus --project ontrak info <instance>`; confirm the guest has an IP on `ontrak0`. If RDP is up but WinRM is not, the image's `post-install.ps1` step did not run — rebuild the golden image. |
+| `make golden` reports success but every Windows template then hangs at the firmware boot prompt, and `ontrak doctor` still says the golden image is present | the ISO install was OOM-killed and the half-applied disk was published as the image. Incus gives a VM disk the host write cache by default, so applying the ~7 GiB Windows image is charged to the container's memory cgroup; on a 16 GiB range host the kernel kills qemu part-way through the apply. The pinned builder (`tools/click.py`) then only waits for `incus ls` to report STOPPED — it cannot tell that kill from the clean sysprep shutdown it expects — and `pack.sh` publishes the truncated disk anyway | `infra/build-golden-image.sh` now sets the build disk to `io.cache=none` and bounds the guest RAM (`ONTRAK_GOLDEN_CPUS`/`ONTRAK_GOLDEN_MEMORY`), which removes the pressure that caused the kill. Re-run `make golden`. To check a suspect image, inspect its ESP: a formatted-but-empty ESP (no `EFI/Microsoft/Boot/bootmgfw.efi`) means the apply never finished |
 | `pywinrm` errors with 401 | wrong training password, or the account is not a local admin | Compare with `guest.password`; the image sets `LocalAccountTokenFilterPolicy=1` so elevation should work |
 | Template build fails with "never obtained an address" | wrong bridge or DHCP range exhausted | `incus network get ontrak0 ipv4.dhcp.ranges`; widen the range for large classes |
 | Template build fails with "did not report ONTRAK-SETUP-OK" | the setup script threw | The error includes the output tail; run the VM manually and execute `setup.ps1` to see the full error |
@@ -367,7 +368,12 @@ no password — mounted only while `demo.enabled` is on.
   Incus covers it. The Zabbly repository is the upstream Incus channel.
 * **Third-party build tool:** `antifob/incus-windows` automates the unattended
   Windows install. Pin a commit (`ONTRAK_INCUS_WINDOWS_REF`) — it is a build-time
-  dependency, not a runtime one, and its interface changes between versions.
+  dependency, not a runtime one, and its interface changes between versions. Two of
+  its behaviours have bitten this stack and are worked around in
+  `infra/build-golden-image.sh`: it sizes its build VM at the whole host (rewritten
+  to `ONTRAK_GOLDEN_CPUS`/`ONTRAK_GOLDEN_MEMORY`) and its `tools/click.py` treats any
+  stop as a finished install, so a killed build publishes silently — see the
+  golden-image row above.
 
 ## Legacy platform notes
 

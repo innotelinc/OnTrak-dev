@@ -82,6 +82,30 @@ else
   warn "could not size the build VM: tools/pack.sh no longer matches (it is a pinned third-party checkout, so this is a change to re-read) — it will take the host's defaults"
 fi
 
+# ------------------------------------------------- build disk write cache --
+# Incus hands a VM disk to qemu with the "writeback" cache by default, so every
+# block the guest writes is charged to the host page cache *and* to the
+# container's memory cgroup. Applying the ~7 GiB Windows image that way is what
+# made the first three builds fail: the cgroup reached its limit and the kernel
+# OOM-killed qemu in the middle of the apply.
+#
+# The failure then hides itself. tools/click.py (a pinned third-party tool) waits
+# for `incus ls` to report STOPPED and treats that as "the installer finished" —
+# it cannot tell a clean sysprep shutdown from a killed process — so pack.sh goes
+# on to publish and export the half-applied disk as if it were a golden image.
+# A qemu kill is therefore silent: you get an image whose ESP has no Windows boot
+# files, and every Windows template built from it fails much later.
+#
+# Bypassing the host write cache for the build disk removes the memory pressure
+# that caused the kill, which is the fix that actually matters. (ONTRAK_GOLDEN_CPUS
+# / ONTRAK_GOLDEN_MEMORY above bound the guest's own RAM for the same reason.)
+if sed -i '/^incus config device set "${name}" root io.bus=virtio-blk$/a incus config device set "${name}" root io.cache=none' "$CHECKOUT/tools/pack.sh" \
+   && grep -q 'root io.cache=none' "$CHECKOUT/tools/pack.sh"; then
+  log "build disk set to io.cache=none (keeps the Windows image apply out of the host page cache)"
+else
+  warn "could not set io.cache=none on the build disk: tools/pack.sh no longer matches — on a 16 GiB range host, expect the OOM kill described above"
+fi
+
 # ------------------------------------------------------------------- build ----
 log "building the Windows ${TARGET} image (this takes 30-60 minutes)"
 pushd "$CHECKOUT" >/dev/null
