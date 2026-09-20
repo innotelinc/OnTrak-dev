@@ -195,6 +195,19 @@ if ! incus --project "$PROJECT" profile device get default eth0 network >/dev/nu
   incus --project "$PROJECT" profile device add default eth0 nic network="$NETWORK"
 fi
 
+# The *default* project's default profile needs the same root disk device, and it
+# is the one nothing else sets up. `infra/build-golden-image.sh` runs
+# antifob/incus-windows, which drives Incus without `--project` — so its build VM is
+# created in the default project, and the builder overrides the root disk size.
+# Incus refuses to override a device the profile does not declare, so without this
+# the golden build dies just after repacking the ISO (45 minutes in) with
+# `Cannot override config for device "root": Device not found in profile devices`,
+# and every Windows template fails for want of an image that was never built.
+if ! incus profile device get default root pool >/dev/null 2>&1; then
+  log "configuring the default project's default profile (root disk for the golden build)"
+  incus profile device add default root disk path=/ pool="$STORAGE_POOL"
+fi
+
 if ! incus --project "$PROJECT" profile list --format=csv -c n | grep -qx "ontrak-student"; then
   log "creating the ontrak-student limits profile"
   incus --project "$PROJECT" profile create ontrak-student

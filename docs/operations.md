@@ -23,11 +23,31 @@ replacements as sessions end.
 
 | Host | Students (simultaneous) | Notes |
 | --- | --- | --- |
+| 4 vCPU / 15 GiB, `dir` storage | 1 | This site. See "One student at a time" below. |
 | 8 vCPU / 16 GiB, `dir` storage | 2-3 | Development only. Every clone is a full 20-30 GB copy. |
 | 16 vCPU / 64 GiB, ZFS or btrfs | 8-12 | Small class. Pool of 4-6 prewarmed for instant handoff. |
 | 32 vCPU / 128 GiB, ZFS or btrfs | 20-26 | Comfortable class of 20 with a pool of 10. |
 | 64 vCPU / 256 GiB, ZFS or btrfs | 45-55 | Two classes back to back, or one large lab. |
 | Incus cluster (2× 32 vCPU / 128 GiB) | 40-50 | Recommended above ~30 students; one control node runs the portal. |
+
+### One student at a time
+
+The lab host (`ontrak`) is 4 vCPU / 15 GiB on `dir` storage, and it runs a single
+student. That is a policy, not the arithmetic: two fit on paper, and two at once is
+exactly the case that swaps — one of them is `os-perf-startup`, which burns a core
+by design. So the pool is sized for one machine, which is also what makes the first
+connection instant:
+
+```text
+ONTRAK_POOL__DEFAULT_TARGET=1   # one machine warm and waiting for the student
+ONTRAK_POOL__MAX_TOTAL=1        # and never a second one pre-built beside it
+```
+
+`pool.max_total` bounds *pool* VMs, not sessions: a session that outlives the warm
+machine still provisions from the template's `clean` snapshot, so the ceiling costs
+latency rather than access. Raise both only when the host itself grows — with `dir`
+storage every clone is a full 20-30 GB copy, so the second student is the expensive
+one.
 
 ### CPU: mind the performance scenario
 
