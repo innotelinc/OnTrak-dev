@@ -22,6 +22,8 @@
 #   ONTRAK_VIRTIO_VERSION   override the virtio-win version (0.1.285-1 or newer is
 #                          needed for the vsock driver that incus-exec uses)
 #   ONTRAK_IMAGE_ALIAS      published alias (default ontrak-win-base)
+#   ONTRAK_GOLDEN_CPUS      vCPU for the build VM (default 2)
+#   ONTRAK_GOLDEN_MEMORY    RAM for the build VM (default 6GB)
 
 set -euo pipefail
 
@@ -61,6 +63,23 @@ else
   log "cloning antifob/incus-windows (${REF})"
   git clone --quiet https://github.com/antifob/incus-windows.git "$CHECKOUT"
   git -C "$CHECKOUT" checkout --quiet "$REF"
+fi
+
+# ------------------------------------------------------------ build VM sizing --
+# The builder sizes its own build VM at 4 vCPU / 8 GB (tools/pack.sh). On a range
+# host with four cores that is *every* core it has, and Windows Setup uses them: the
+# host keeps answering ping and accepting TCP while nothing in user space is
+# scheduled, so sshd and the portal never reply and the lab is down for the length
+# of the build. That is not a guess — it is what this script did to a 4 vCPU host,
+# which was unreachable for hours with the build still running. The sizing is
+# rewritten here so the host stays usable. Raise it where there are cores to spare.
+BUILD_CPUS="${ONTRAK_GOLDEN_CPUS:-2}"
+BUILD_MEMORY="${ONTRAK_GOLDEN_MEMORY:-6GB}"
+if sed -i -E "s/-c limits\.cpu=[0-9]+ -c limits\.memory=[0-9]+G?B?/-c limits.cpu=${BUILD_CPUS} -c limits.memory=${BUILD_MEMORY}/" "$CHECKOUT/tools/pack.sh" \
+   && grep -q -- "-c limits.cpu=${BUILD_CPUS} -c limits.memory=${BUILD_MEMORY}" "$CHECKOUT/tools/pack.sh"; then
+  log "build VM sized at ${BUILD_CPUS} vCPU / ${BUILD_MEMORY} (ONTRAK_GOLDEN_CPUS / ONTRAK_GOLDEN_MEMORY)"
+else
+  warn "could not size the build VM: tools/pack.sh no longer matches (it is a pinned third-party checkout, so this is a change to re-read) — it will take the host's defaults"
 fi
 
 # ------------------------------------------------------------------- build ----
