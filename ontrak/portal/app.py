@@ -199,8 +199,18 @@ def _session_link(request: Request, session) -> str:
         return ""
 
 
+# The guests live on the lab's own bridge (10.20.0.0/24) and nothing routes to them
+# from outside it. The portal is on the internet, the machines are not, so the
+# browser console is the only way in from a student's own network and the address is
+# an identifier for the machine rather than something to connect to. Saying so is
+# not a detail: the page that handed over `10.20.0.151` as "the address above is
+# still yours to connect to directly" was telling a remote student to ssh into a
+# machine their network cannot reach.
+LAB_NETWORK = "the lab's internal network"
+
+
 def _machine_address(settings, scenario, session) -> dict:
-    """What a student connects to, and how, for this scenario's platform.
+    """What a student connects to, how, and from where it can be reached.
 
     A Windows guest brokers RDP on ``guest.rdp_port``; a Linux guest is a shell,
     reached over SSH on ``guest.ssh_port`` when the template runs an sshd
@@ -208,21 +218,27 @@ def _machine_address(settings, scenario, session) -> dict:
     way it is a string the portal already holds, so it belongs on the page. The
     alternative - telling the student to ask their instructor - puts a person in the
     loop for every session and leaves a blank page when nobody is watching.
+
+    ``reach`` is where that address works, and it is the same answer for every
+    machine here: the lab's internal network. The address is shown so the machine is
+    identified, and the console is what actually gets a student to it.
     """
     host = session.host_ip
     if not host:
-        return {"host": "", "target": "", "user": "", "transport": ""}
+        return {"host": "", "target": "", "user": "", "transport": "", "reach": LAB_NETWORK}
     if scenario.is_linux:
         user = settings.guest.linux_user or "root"
         if settings.guac.linux_ssh:
             return {"host": host,
                     "target": f"ssh {user}@{host} -p {settings.guest.ssh_port}",
-                    "user": user, "transport": "SSH"}
+                    "user": user, "transport": "SSH", "reach": LAB_NETWORK}
         # No sshd in the image: the shell is the guest's own console, not a socket.
-        return {"host": host, "target": host, "user": user, "transport": "shell"}
+        return {"host": host, "target": host, "user": user,
+                "transport": "shell", "reach": LAB_NETWORK}
     return {"host": host,
             "target": f"{host}:{settings.guest.rdp_port}",
-            "user": session.rdp_user or settings.guest.user, "transport": "RDP"}
+            "user": session.rdp_user or settings.guest.user, "transport": "RDP",
+            "reach": LAB_NETWORK}
 
 
 def _console_gateway_verdict(request: Request) -> tuple[str, str]:

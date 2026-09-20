@@ -4,7 +4,7 @@ import pytest
 
 from ontrak.demo import synthesise_ticket
 from ontrak.models import Session, SessionState
-from ontrak.portal.app import _machine_address
+from ontrak.portal.app import LAB_NETWORK, _machine_address
 from ontrak.tickets import WRITEUP_ACTION
 
 from .conftest import csrf, login
@@ -393,10 +393,69 @@ def test_a_linux_machine_says_how_it_is_reached(app_client):
     address = _machine_address(settings, windows, session)
     assert address["transport"] == "RDP"
     assert address["target"] == f"10.20.0.9:{settings.guest.rdp_port}"
+    # Every form is an address on the lab's bridge — nothing here routes from the
+    # internet, which is what the page has to say alongside it.
+    assert address["reach"] == LAB_NETWORK
 
     # Nothing to show until the guest has an address of its own.
     empty = Session(id=2, student="alice", scenario_id=LINUX_SCENARIO)
     assert _machine_address(settings, scenario, empty)["host"] == ""
+
+
+def test_the_address_says_where_it_works(app_client):
+    """The address identifies the machine; the console is what reaches it.
+
+    The guests are on the lab's own bridge, so `10.20.0.x` is unroutable from a
+    student's network. The page used to hand that address over as "still yours to
+    connect to directly", which tells a remote student to ssh somewhere their laptop
+    cannot go; it now names the network the address belongs to and the console as the
+    way in.
+    """
+    client, app = app_client
+    login(client, "alice")
+    client.post("/sessions/start", data={"scenario_id": SCENARIO, "csrf": csrf(client)})
+    session = provision(app)
+
+    page = client.get(f"/sessions/{session.id}").text
+    assert session.host_ip in page
+    # Rendered, so the apostrophe in LAB_NETWORK arrives HTML-escaped: assert on the
+    # words rather than on the Python string.
+    assert "internal network" in page
+    assert "does not route from outside it" in page
+    assert "still yours to connect to directly" not in page
+
+
+def test_a_linux_session_gets_a_shell_console_in_the_browser(app_client):
+    """A Linux machine's console is an SSH shell, signed and embedded.
+
+    With no route to the guests from outside the lab, this is the only way into a
+    Linux machine for a remote student, so it is asserted end to end: the signed
+    payload asks for ssh on the guest's port, and the page embeds that link instead of
+    the copy that said there was no remote desktop to open.
+    """
+    from ontrak import guac
+
+    client, app = app_client
+    settings = app.state.settings
+    settings.guac.linux_ssh = True
+    login(client, "alice")
+    # A live Linux machine, placed directly: this fixture has no guest to install an
+    # sshd into, and what is under test is the console the portal signs and embeds
+    # for such a machine, not the install that precedes it.
+    session = app.state.manager.create_session("alice", LINUX_SCENARIO)
+    session.host_ip = "10.20.0.9"
+    session.state = SessionState.IN_USE
+    app.state.store.save_session(session)
+
+    payload = guac.build_payload(settings, session, app.state.repo.get(LINUX_SCENARIO))
+    connection = next(iter(payload["connections"].values()))
+    assert connection["protocol"] == "ssh"
+    assert connection["parameters"]["hostname"] == session.host_ip
+    assert connection["parameters"]["port"] == str(settings.guest.ssh_port)
+
+    page = client.get(f"/sessions/{session.id}").text
+    assert '<iframe id="console"' in page
+    assert "no remote desktop to open here" not in page
 
 
 def test_the_provisioning_copy_names_the_platform_being_started(app_client):

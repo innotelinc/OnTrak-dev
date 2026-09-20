@@ -69,6 +69,14 @@
           </tr>
           {% if address.user %}<tr><th>Account</th><td><code>{{ address.user }}</code></td></tr>{% endif %}
         </table>
+        {# The guests are on the lab's own bridge with no route in from outside it, so
+           the address identifies the machine and the console is what reaches it. That
+           distinction is the difference between a student on their own network knowing
+           where to type and knowing their laptop cannot get there at all. #}
+        <p class="muted small">
+          That address is on {{ address.reach }} and does not route from outside it.
+          {% if console_url %}The console is how you reach this machine from anywhere else.{% endif %}
+        </p>
       {% else %}
         <p class="muted small">This machine's address appears here as soon as it has one.</p>
       {% endif %}
@@ -95,19 +103,24 @@
       {% elif console_url %}
         <p class="muted">The console appears once the machine is ready.</p>
       {% elif scenario.is_linux %}
-        {# No remote desktop to embed: the guest is a Linux container, which runs no
-           RDP server — an iframe here used to report "the remote desktop server is
-           currently unreachable", which reads like a fault in the lab rather than a
-           console that does not apply. Say what this scenario actually is. #}
+        {# No remote desktop to embed: the guest is a Linux container, which speaks SSH
+           and runs no RDP server — an iframe here used to report "the remote desktop
+           server is currently unreachable", which reads like a fault in the lab rather
+           than a console that does not apply. A Linux machine's console *is* its shell
+           (guac.linux_ssh), so with the console configured this branch is not reached. #}
         <p class="muted">
-          This scenario runs on a Linux machine, so there is no remote desktop to open here.
-          Work in a shell on the machine itself, as the briefing describes — the address
-          above is the machine you are working on.
+          This scenario runs on a Linux machine, so there is no remote desktop to open
+          here — the console is its shell, and no console is configured for this
+          deployment. The address above is reachable from inside {{ address.reach }}
+          only, so there is nothing to connect to from off that network until the
+          instructor sets one up.
         </p>
       {% else %}
         <p class="muted">
           No browser console is configured (the instructor needs to set guac.base_url and
-          guac.secret_key). The address above is still yours to connect to directly.
+          guac.secret_key), and the address above is reachable from inside
+          {{ address.reach }} only — there is nothing to connect to from off that network
+          until that is set up.
         </p>
       {% endif %}
     </div>
