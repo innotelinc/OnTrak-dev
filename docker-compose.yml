@@ -156,6 +156,15 @@ services:
       ONTRAK_GUAC__BASE_URL: ${ONTRAK_GUAC__BASE_URL:-http://localhost:8080/guacamole/}
       ONTRAK_GUAC__RECORDING: ${ONTRAK_GUAC__RECORDING:-false}
       ONTRAK_GUAC__RECORDING_PATH: /recordings
+      # The student's console transport. Fixing this list is what makes the setting
+      # in .env actually reach the portal: the console is built from settings inside
+      # this container, so a value compose does not forward is a value the range
+      # ignores — and the symptom is silent, because a Linux scenario with
+      # linux_ssh off renders a page explaining why rather than an error. Turn it on
+      # and `ontrak template build` puts sshd in the Linux templates (docs/operations.md,
+      # "The student's console: RDP for Windows, SSH for Linux").
+      ONTRAK_GUAC__LINUX_SSH: ${ONTRAK_GUAC__LINUX_SSH:-false}
+      ONTRAK_GUEST__RDP_PORT: ${ONTRAK_GUEST__RDP_PORT:-3389}
       ONTRAK_SECRETS_FILE: /run/ontrak/secrets.env
 
       # ── hypervisor ──
@@ -173,6 +182,11 @@ services:
       ONTRAK_GUEST__USER: ${ONTRAK_GUEST__USER:-student}
       ONTRAK_GUEST__PASSWORD: ${ONTRAK_GUEST__PASSWORD:-}
       ONTRAK_GUEST__STATIC_HOST: ${ONTRAK_GUEST__STATIC_HOST:-}
+      # The Linux console's own address and account. `linux_user` is root for the
+      # reason on GuestConfig in ontrak/config.py: grading reads /etc/shadow,
+      # /etc/sudoers and file ownership, and the machine is disposable.
+      ONTRAK_GUEST__SSH_PORT: ${ONTRAK_GUEST__SSH_PORT:-22}
+      ONTRAK_GUEST__LINUX_USER: ${ONTRAK_GUEST__LINUX_USER:-root}
 
       # ── sessions, results and pools ──
       ONTRAK_SESSION__TTL_MINUTES: ${ONTRAK_SESSION__TTL_MINUTES:-90}
