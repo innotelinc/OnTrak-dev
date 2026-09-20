@@ -101,19 +101,27 @@ class IncusClient:
         project: bool = True,
     ) -> subprocess.CompletedProcess:
         cmd = self._base(project) + list(args)
+        # The configured operation timeout is the ceiling for *every* call, not just
+        # the mutating ones that ask for it explicitly. Reads are not cheap: `incus
+        # list` reports each instance's state, agent status and address, so on a busy
+        # host it blocks for minutes on a VM that is still booting — and a bare
+        # DEFAULT_TIMEOUT failed a template build at exactly that point ("incus list
+        # --format=json failed (124): timed out after 120s") even with the operator's
+        # ONTRAK_INCUS__OPERATION_TIMEOUT_SECONDS raised.
+        effective_timeout = timeout or self.timeout or DEFAULT_TIMEOUT
         try:
             proc = subprocess.run(  # noqa: S603 - arguments are internal, never user input
                 cmd,
                 capture_output=capture,
                 text=True,
                 input=input_data,
-                timeout=timeout or DEFAULT_TIMEOUT,
+                timeout=effective_timeout,
                 check=False,
             )
         except FileNotFoundError as exc:
             raise IncusError(args, 127, f"{self.binary} not found on PATH: {exc}") from exc
         except subprocess.TimeoutExpired as exc:
-            raise IncusError(args, 124, f"timed out after {timeout or DEFAULT_TIMEOUT}s") from exc
+            raise IncusError(args, 124, f"timed out after {effective_timeout}s") from exc
         if check and proc.returncode != 0:
             stderr = proc.stderr or ""
             if "not found" in stderr.lower() or "No such" in stderr:
