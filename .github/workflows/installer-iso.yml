@@ -54,6 +54,10 @@ on:
         description: Also boot the image in QEMU and watch for the installer
         type: boolean
         default: false
+      install:
+        description: Also install a machine from the image and check it (needs KVM, ~15 min)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -217,4 +221,30 @@ jobs:
           path: |
             ${{ runner.temp }}/iso-smoke.log
             ${{ runner.temp }}/iso-cache/work/smoke/serial.log
+          retention-days: 14
+
+      # The whole thing: install a machine from the image and sign in to it. The
+      # Linux runners have /dev/kvm, which is what makes this possible here at all
+      # — the range host is a nested container on a shared box and has no usable
+      # one. Manual, because it is a quarter of an hour.
+      - name: Install a machine and check it
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.install }}
+        env:
+          ONTRAK_INSTALL_TEST_WORK: ${{ runner.temp }}/install-test
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 sshpass
+          # The password comes from the creds file the build wrote beside the ISO:
+          # that file is the identity screen's default, so this signs in the way an
+          # operator who accepted the defaults would.
+          bash infra/installer/install-test.sh "$(ls dist/*.iso | head -1)"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.install }}
+        with:
+          name: installer-iso-install-test
+          path: |
+            ${{ runner.temp }}/install-test/serial-1.log
+            ${{ runner.temp }}/install-test/serial-2.log
+            ${{ runner.temp }}/install-test/installer-screen.ppm
           retention-days: 14

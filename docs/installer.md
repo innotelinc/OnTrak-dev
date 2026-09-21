@@ -89,6 +89,7 @@ Build-time settings, for `make installer-iso`:
 | `ONTRAK_INSTALLER_USERNAME`, `ONTRAK_INSTALLER_HOSTNAME` | `ontrak`, `ontrak-range` |
 | `ONTRAK_INSTALLER_PASSWORD` | a random one per build, printed at the end |
 | `ONTRAK_ISO_SMOKE=1` | also boot the result in QEMU (`ONTRAK_ISO_SMOKE_SECONDS`, default 600) |
+| `ONTRAK_INSTALL_TEST_*` | the install test's scratch dir, deadlines, disk size and identity (see the script) |
 
 The username, hostname and password are **defaults for the identity screen**, not
 secrets: whoever is at the console sets their own. The build writes the fallback to
@@ -117,6 +118,27 @@ xorriso is the only tool that has to be recent; if it is not installed, the buil
 uses it from a throwaway `ubuntu:24.04` container (built once, tagged
 `ontrak-iso-builder:24.04`) rather than installing anything on the operator's
 machine.
+
+## Installing a machine, as a test
+
+`infra/installer/install-test.sh` is the only check that answers the question an
+operator actually has: it boots the image, answers the identity screen over the QEMU
+monitor the way a person at a console would, waits for the install to reboot the
+machine, boots what was installed, signs in over SSH as the default identity, and
+checks that the payload really landed — the first-boot script, its unit enabled, the
+settings example, the account, the SSH server — and prints the first boot's log.
+
+```bash
+make installer-iso-test                       # the newest ISO in dist/
+bash infra/installer/install-test.sh dist/ontrak-installer-24.04.5-amd64.iso
+```
+
+It needs KVM (an install under software emulation takes hours, and the test says so
+rather than pretending). The disk and logs are kept when it fails, so the
+`screendump` of the installer's screen and the console log are there to read. In CI it
+is a manual dispatch — *Installer ISO* → *Run workflow* → *install* — because it takes
+about a quarter of an hour; GitHub's Linux runners have `/dev/kvm`, which is what
+makes it possible there and not on the range host.
 
 ## Troubleshooting
 

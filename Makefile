@@ -19,7 +19,7 @@ REMOTE_OVERLAY := -f docker-compose.yml -f docker-compose.remote.yml
 .PHONY: help setup secrets check doctor validate test lint demo \
         catalog catalog-validate media-status media-fetch generate schedule \
         templates pool reap demo-serve host-image landing \
-        installer-iso installer-iso-smoke \
+        installer-iso installer-iso-smoke installer-iso-test \
         build up up-remote down logs ps exec check-compose setup-log \
         docker-demo docker-shell provision provision-plan console-recreate
 
@@ -51,6 +51,11 @@ installer-iso: ## Build the bootable range-host installer ISO
 
 installer-iso-smoke: ## Build the installer ISO, then boot it in QEMU to prove it installs
 	ONTRAK_ISO_SMOKE=1 bash infra/build-installer-iso.sh
+
+installer-iso-test: ## Install a machine from the built ISO in QEMU, then check it over SSH
+	@iso="$$(ls -t dist/*.iso 2>/dev/null | head -1)"; \
+	test -n "$$iso" || { echo "no ISO in dist/ — run 'make installer-iso' first"; exit 2; }; \
+	bash infra/installer/install-test.sh "$$iso"
 
 ## ---- Docker stack (portal + console gateway) ----------------------------
 
