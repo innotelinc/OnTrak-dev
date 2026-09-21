@@ -67,8 +67,10 @@ FORCE=0
 
 if [[ -f "$CONFIG" ]]; then
   log "reading $CONFIG"
-  # shellcheck disable=SC1090  # operator-provided, by design
-  set -a; . "$CONFIG"; set +a
+  set -a
+  # shellcheck source=/dev/null  # operator-provided, by design
+  . "$CONFIG"
+  set +a
   # Re-read the settings the file may have just defined.
   REPO_URL="${ONTRAK_REPO_URL:-$REPO_URL}"
   BRANCH="${ONTRAK_BRANCH:-$BRANCH}"
