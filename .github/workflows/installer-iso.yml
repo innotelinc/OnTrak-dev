@@ -1,0 +1,220 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# installer-iso.yml — the bootable range-host installer.
+#
+# infra/build-installer-iso.sh produces the one artefact in this repository that
+# has to work on a machine nobody can debug: a bare box with a console, before
+# anything else exists on it. It is also the easiest thing here to break
+# silently, because a broken ISO still boots — it just installs something other
+# than what was intended, and the failure surfaces as an operator standing in
+# front of a machine.
+#
+# So the build runs on every change to it, and the image's own assertions have to
+# pass: the payload read back out of the finished image, the boot entries
+# carrying the autoinstall, the installer's kernel and initrd untouched by the
+# repack, and both El Torito entries plus the isohybrid MBR/GPT present. On top
+# of those, this workflow checks the *design* the ISO is built on — that the
+# autoinstall still stops on identity alone, so no credential is baked into an
+# image that gets copied around the estate.
+#
+# Installing a machine from the image takes a quarter of an hour and needs KVM,
+# so it is a manual dispatch rather than something every push pays for;
+# `make installer-iso-smoke` is the same test locally. This is deliberately not
+# part of ci.yml: that workflow is the fast static bar, and this one downloads a
+# 4 GB base image.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: Installer ISO
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - infra/build-installer-iso.sh
+      - infra/installer/**
+      - docs/installer.md
+      - .github/workflows/installer-iso.yml
+  pull_request:
+    paths:
+      - infra/build-installer-iso.sh
+      - infra/installer/**
+      - docs/installer.md
+      - .github/workflows/installer-iso.yml
+  # Weekly: a base image that moves, or a checksum Canonical has reissued, should
+  # be caught here rather than on the machine being installed. The build also
+  # verifies the base image's sha256 against releases.ubuntu.com.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Base Ubuntu release under releases.ubuntu.com/24.04
+        required: false
+        default: "24.04.5"
+      smoke:
+        description: Also boot the image in QEMU and watch for the installer
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  iso:
+    name: Build the installer ISO
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # A remaster holds the base image, the tree extracted from it and the result
+      # at the same time — about 12 GB, and the base image is kept for the repack
+      # because xorriso takes the boot equipment straight out of it.
+      - name: Room for a 4 GB base image and the tree it is repacked from
+        run: |
+          set -euo pipefail
+          df -h / | tail -1
+          avail="$(df --output=avail -BG / | tail -1 | tr -dc '0-9')"
+          if [ "${avail:-0}" -lt 20 ]; then
+            echo "only ${avail}G free: removing the runner's preinstalled toolchains"
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                        /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+            df -h / | tail -1
+          fi
+
+      - name: xorriso
+        run: |
+          set -euo pipefail
+          # The build falls back to a container when the host has no xorriso; on a
+          # runner it is one package and much faster.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xorriso
+          xorriso --version | head -1
+
+      - name: Build
+        env:
+          # The 4 GB base image does not belong in the checkout.
+          ONTRAK_ISO_CACHE: ${{ runner.temp }}/iso-cache
+          ONTRAK_UBUNTU_RELEASE: ${{ inputs.release || '24.04.5' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$ONTRAK_ISO_CACHE"
+          bash infra/build-installer-iso.sh 2>&1 | tee "$RUNNER_TEMP/iso-build.log"
+          ls -l dist/
+
+      # The image on its own is not evidence: these read it back and check the
+      # promises it is handed over with. (The script above already checked that
+      # its payload is present, its boot entries are patched and its kernel is
+      # untouched — this is the part about what the operator will see.)
+      - name: The installer asks for identity, and nothing else
+        run: |
+          set -euo pipefail
+          iso="$(ls dist/*.iso | head -1)"
+          xorriso -osirrox on -indev "$iso" -extract /nocloud/user-data "$RUNNER_TEMP/user-data" >/dev/null
+
+          echo "--- interactive sections ---"
+          mapfile -t sections < <(awk '
+            /^  interactive-sections:/ { f=1; next }
+            f && /^  [^ ]/             { exit }
+            f && /^[[:space:]]+-/      { gsub(/^[[:space:]]+-[[:space:]]*/, ""); print }
+          ' "$RUNNER_TEMP/user-data")
+          printf '  %s\n' "${sections[@]:-<none>}"
+
+          # One screen, and it is identity. Any other interactive section means a
+          # boot nobody answers sits at a prompt — the opposite of the point.
+          [ "${#sections[@]}" -eq 1 ] \
+            || { echo "::error::interactive-sections is not exactly one section"; exit 1; }
+          [ "${sections[0]}" = "identity" ] \
+            || { echo "::error::the one interactive section is not identity"; exit 1; }
+
+          # A default identity is carried so an unanswered boot still ends in a
+          # usable host — but it must be a password hash, never a password.
+          grep -qE '^    password: "\$6\$' "$RUNNER_TEMP/user-data" \
+            || { echo "::error::the autoinstall does not carry a hashed default password"; exit 1; }
+          echo 'identity: one interactive section, hashed default password'
+
+      - name: The first-boot payload is wired into the install
+        run: |
+          set -euo pipefail
+          iso="$(ls dist/*.iso | head -1)"
+          xorriso -osirrox on -indev "$iso" -extract /nocloud/user-data "$RUNNER_TEMP/user-data" >/dev/null
+          xorriso -osirrox on -indev "$iso" -extract /boot/grub/grub.cfg "$RUNNER_TEMP/grub.cfg" >/dev/null
+
+          # late-commands copy the payload in and enable the unit; without either,
+          # the machine installs Ubuntu and stops there.
+          grep -q '/cdrom/ontrak/firstboot.sh'      "$RUNNER_TEMP/user-data" \
+            || { echo "::error::the autoinstall does not install the first-boot script"; exit 1; }
+          grep -q 'ontrak-firstboot.service'        "$RUNNER_TEMP/user-data" \
+            || { echo "::error::the autoinstall does not install the first-boot unit"; exit 1; }
+          grep -q 'curtin in-target -- systemctl enable ontrak-firstboot.service' \
+                                                    "$RUNNER_TEMP/user-data" \
+            || { echo "::error::the first-boot unit is not enabled in the target"; exit 1; }
+          # And the machine has to come back up, or the unit never runs.
+          grep -q 'shutdown: reboot'                "$RUNNER_TEMP/user-data" \
+            || { echo "::error::the install does not reboot into the provisioned system"; exit 1; }
+
+          # Both menu entries — the standard and the HWE kernel — must request the
+          # autoinstall, or choosing the other one silently installs interactively.
+          patched="$(grep -c 'ds=nocloud;s=/cdrom/nocloud/' "$RUNNER_TEMP/grub.cfg")"
+          echo "boot entries requesting the autoinstall: $patched"
+          [ "$patched" -ge 2 ] \
+            || { echo "::error::a /casper boot entry does not request the autoinstall"; exit 1; }
+
+          echo 'payload: installed, enabled, and both boot entries patched'
+
+      # What was built, for a human: the log, the autoinstall that shipped (with
+      # the per-build password hash redacted — it is a throwaway, but a hash has
+      # no business in an artifact) and the boot entries.
+      - name: Manifest
+        run: |
+          set -euo pipefail
+          {
+            echo "OnTrak installer ISO"
+            echo "commit:  $(git rev-parse HEAD)"
+            echo "release: ${{ inputs.release || '24.04.5' }}"
+            echo
+            ls -l dist/
+            echo
+            echo "--- base image ---"
+            grep -E 'sha256 verified|already downloaded|downloading' "$RUNNER_TEMP/iso-build.log" || true
+            echo
+            echo "--- verification the build performed ---"
+            grep -E '^==> ' "$RUNNER_TEMP/iso-build.log" || true
+          } > "$RUNNER_TEMP/manifest.txt"
+          sed -E 's/^(    password: ).*/\1"<generated per build, redacted>"/' \
+            "$RUNNER_TEMP/user-data" > "$RUNNER_TEMP/user-data.redacted"
+          cat "$RUNNER_TEMP/manifest.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-iso-manifest
+          path: |
+            ${{ runner.temp }}/manifest.txt
+            ${{ runner.temp }}/iso-build.log
+            ${{ runner.temp }}/user-data.redacted
+            ${{ runner.temp }}/grub.cfg
+          retention-days: 14
+
+      # The whole test: install a machine from the image. Manual only — it is a
+      # quarter of an hour, and it needs KVM on the runner (the script says so and
+      # skips the boot test when there is none, which is why this step cannot fail
+      # the job on a machine that simply lacks it).
+      - name: Boot it and watch for the installer
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke }}
+        env:
+          ONTRAK_ISO_CACHE: ${{ runner.temp }}/iso-cache
+          ONTRAK_UBUNTU_RELEASE: ${{ inputs.release || '24.04.5' }}
+          ONTRAK_ISO_SMOKE: "1"
+          ONTRAK_ISO_SMOKE_SECONDS: "900"
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+          bash infra/build-installer-iso.sh 2>&1 | tee "$RUNNER_TEMP/iso-smoke.log"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke }}
+        with:
+          name: installer-iso-smoke
+          path: |
+            ${{ runner.temp }}/iso-smoke.log
+            ${{ runner.temp }}/iso-cache/work/smoke/serial.log
+          retention-days: 14

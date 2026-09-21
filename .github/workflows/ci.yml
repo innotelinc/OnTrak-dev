@@ -30,7 +30,12 @@ jobs:
           set -euo pipefail
           for f in README.md LICENSE .env.example .gitignore \
                    web/landing/index.html docs/stack.md docs/catalog.md docs/roadmap.md \
-                   .github/workflows/attribution-guard.yml .githooks/guard-lib; do
+                   .github/workflows/attribution-guard.yml .githooks/guard-lib \
+                   docs/installer.md infra/build-installer-iso.sh \
+                   infra/installer/README.txt \
+                   infra/installer/autoinstall/user-data.dist \
+                   infra/installer/firstboot/ontrak-firstboot.sh \
+                   infra/installer/firstboot/ontrak-firstboot.service; do
             if [ ! -f "$f" ]; then
               echo "::error::missing required file: $f"
               exit 1
