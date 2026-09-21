@@ -100,6 +100,11 @@ make templates                        # build every scenario template
 make serve                            # or `make up`, to run it in Docker
 ```
 
+On bare metal, `make installer-iso` builds the bootable image that does all of that for
+you: Ubuntu Server 24.04 plus the first-boot provisioning (Incus, the lab bridge, the
+checkout, the portal stack). The operator answers one screen — identity — so no
+credential is baked into the image. [docs/installer.md](docs/installer.md).
+
 ## Documentation
 
 | Doc | What it covers |
@@ -110,6 +115,7 @@ make serve                            # or `make up`, to run it in Docker
 | [docs/scenarios.md](docs/scenarios.md) | The five scenario families, why they are ranked that way, how to write one, and how generation works |
 | [docs/operations.md](docs/operations.md) | Host sizing, capacity maths, warm pools, schedules, media management, backups and troubleshooting |
 | [docs/docker.md](docs/docker.md) | The container stack: what runs in Docker and what cannot, the three ways to reach a hypervisor, volumes, secrets, upgrades |
+| [docs/installer.md](docs/installer.md) | The bootable installer ISO: building it, the one screen it stops on, what first boot provisions, and its settings |
 | [docs/roadmap.md](docs/roadmap.md) | What is verified, what is planned, and what is explicitly out of scope |
 
 ## Repo layout
@@ -121,7 +127,7 @@ OnTrak/
 ├── docker/                    # container entrypoint (docker-compose.yml is at the root)
 ├── deploy/guacamole/          # browser-console gateway (HTML5 RDP), standalone deployment
 ├── docs/                      # architecture, catalog, scenarios, operations, stack, roadmap
-├── infra/                     # host bootstrap, golden-image and template builds, workload images
+├── infra/                     # host bootstrap, installer ISO, golden-image and template builds
 ├── ontrak/                    # the platform: catalog, sessions, scoring, portal, CLI
 ├── scenarios/                 # scenarios (scenario.yaml + setup.ps1/check.sh) and the shared guest library
 ├── scripts/setup.sh           # bootstrap: hooks, venv, dependencies, .env

@@ -1,0 +1,106 @@
+#cloud-config
+#
+# OnTrak installer — automation for Ubuntu Server 24.04 LTS.
+#
+# infra/build-installer-iso.sh renders this template (@USERNAME@, @HOSTNAME@,
+# @PASSWORD_HASH@ and the release name), drops it on the ISO at
+# /nocloud/user-data, and points the boot entries at it
+# (`autoinstall ds=nocloud;s=/cdrom/nocloud/`).
+#
+# Design: everything is automated except identity. `interactive-sections` keeps
+# that one screen up, so the operator at the console chooses the admin username,
+# the hostname and the password, and can paste an SSH key. No credential is baked
+# into the image. Identity still carries defaults, so a boot nobody answers still
+# ends in a usable host.
+autoinstall:
+  version: 1
+
+  interactive-sections:
+    - identity
+
+  # Defaults for the interactive identity screen. Whatever the operator types
+  # wins; these are what an unattended boot falls back to.
+  identity:
+    hostname: @HOSTNAME@
+    realname: OnTrak operator
+    username: @USERNAME@
+    password: "@PASSWORD_HASH@"
+
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+
+  # The installer needs the internet (the range host's dependencies are fetched
+  # later, on first boot). Ask for the country mirror, keep archive.ubuntu.com as
+  # a fallback, and if neither answers still install from the ISO itself rather
+  # than aborting.
+  apt:
+    mirror-selection:
+      primary:
+        - country-mirror
+        - uri: "http://archive.ubuntu.com/ubuntu"
+    fallback: offline-install
+    geoip: true
+
+  # DHCP on every physical NIC, renamed or not. The range's own bridge (ontrak0)
+  # is created on first boot by infra/bootstrap-host.sh.
+  network:
+    version: 2
+    ethernets:
+      all-en:
+        match:
+          name: "en*"
+        dhcp4: true
+        dhcp4-overrides:
+          use-hostname: false
+      all-eth:
+        match:
+          name: "eth*"
+        dhcp4: true
+        dhcp4-overrides:
+          use-hostname: false
+
+  # LVM on the largest disk: enough room for Incus's storage pool and the golden
+  # image without the operator partitioning anything.
+  storage:
+    layout:
+      name: lvm
+
+  updates: security
+
+  ssh:
+    install-server: true
+    allow-pw: true
+
+  # Just enough for the first-boot provisioning to start. It installs the rest
+  # (Docker, the OnTrak checkout, Incus) itself, so a change there does not
+  # require rebuilding this ISO.
+  packages:
+    - git
+    - curl
+    - ca-certificates
+    - openssl
+    - rsync
+    - tmux
+    - htop
+
+  late-commands:
+    # Runs in the installer environment once the system is installed: the target
+    # root is /target, the ISO is mounted at /cdrom.
+    - install -d -m 0755 /target/etc/ontrak
+    - cp /cdrom/ontrak/firstboot.sh /target/usr/local/sbin/ontrak-firstboot.sh
+    - chmod 0755 /target/usr/local/sbin/ontrak-firstboot.sh
+    - cp /cdrom/ontrak/ontrak-firstboot.service /target/etc/systemd/system/ontrak-firstboot.service
+    - cp /cdrom/ontrak/firstboot.env.example /target/etc/ontrak/firstboot.env.example
+    - chmod 0644 /target/etc/ontrak/firstboot.env.example
+    - cp /cdrom/ontrak/README.txt /target/opt/ONTRAK-INSTALL.txt
+    - curtin in-target -- systemctl enable ontrak-firstboot.service
+
+  # Keep the installer's own logs when an install fails, so the machine can be
+  # diagnosed without re-running the whole thing.
+  error-commands:
+    - tar -czf /target/var/log/installer-failure.tar.gz /var/log/installer /var/log/syslog || true
+
+  # Reboot into the installed system: that is what makes the first-boot unit run.
+  # Left implicit, an unattended install can end at a powered-off machine.
+  shutdown: reboot

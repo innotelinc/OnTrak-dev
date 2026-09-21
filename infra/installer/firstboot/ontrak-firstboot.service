@@ -1,0 +1,25 @@
+[Unit]
+Description=OnTrak first-boot provisioning (Incus, the lab, the portal stack)
+Documentation=https://github.com/innotelinc/OnTrak/blob/main/docs/installer.md
+# The provisioning needs the internet (packages, the checkout, the portal image
+# build) and Docker, which it installs itself. Ordering on a unit that does not
+# exist yet is deliberately harmless: After= on a missing unit is ignored.
+Wants=network-online.target
+After=network-online.target docker.service
+# Runs exactly once. The script writes this flag only when the hypervisor step
+# succeeded, so a host that boots without /dev/kvm keeps the unit armed until an
+# operator fixes it and re-runs.
+ConditionPathExists=!/var/lib/ontrak/firstboot.done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ontrak-firstboot.sh
+RemainAfterExit=yes
+# Hours on a cold host (apt, the checkout, the Docker image build).
+TimeoutStartSec=infinity
+# Console + journal, so a serial console shows progress on a headless host.
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

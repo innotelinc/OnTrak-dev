@@ -1,0 +1,5 @@
+# nocloud meta-data — the empty-but-present file the nocloud datasource requires
+# alongside user-data. Subiquity reads the autoinstall out of user-data; instance-id
+# is what makes cloud-init treat this as a fresh datasource rather than a re-run.
+instance-id: ontrak-installer
+local-hostname: ontrak

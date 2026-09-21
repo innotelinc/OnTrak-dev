@@ -19,6 +19,7 @@ REMOTE_OVERLAY := -f docker-compose.yml -f docker-compose.remote.yml
 .PHONY: help setup secrets check doctor validate test lint demo \
         catalog catalog-validate media-status media-fetch generate schedule \
         templates pool reap demo-serve host-image landing \
+        installer-iso installer-iso-smoke \
         build up up-remote down logs ps exec check-compose setup-log \
         docker-demo docker-shell provision provision-plan console-recreate
 
@@ -39,6 +40,17 @@ check: ## Preflight: Python, Incus, KVM, storage and secrets
 	$(PY) -m ontrak doctor
 
 doctor: check ## Alias for `check`
+
+## ---- Installer ISO (bare metal → range host) ---------------------------
+# Builds a bootable Ubuntu 24.04 image that installs the host and then provisions
+# itself on first boot: Incus, the lab, the OnTrak checkout and the portal stack.
+# The operator answers one screen (identity). See docs/installer.md.
+
+installer-iso: ## Build the bootable range-host installer ISO
+	bash infra/build-installer-iso.sh
+
+installer-iso-smoke: ## Build the installer ISO, then boot it in QEMU to prove it installs
+	ONTRAK_ISO_SMOKE=1 bash infra/build-installer-iso.sh
 
 ## ---- Docker stack (portal + console gateway) ----------------------------
 

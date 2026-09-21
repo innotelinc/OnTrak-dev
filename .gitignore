@@ -35,6 +35,10 @@ media/
 build-*/
 *.tar.gz
 
+# the installer ISO's build output, including the fallback credentials it writes
+# next to the image (never commit a password)
+dist/
+
 # guacamole session recordings (large, and they show a student's screen)
 deploy/guacamole/recordings/
 
