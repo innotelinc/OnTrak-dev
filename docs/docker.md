@@ -267,6 +267,16 @@ The state volume is untouched by a rebuild. `docker compose down -v` deletes the
 volumes — on a range that has graded results, that is data loss, so it is not a
 "reset".
 
+Building is not pulling. The image this stack runs is built here, from this
+checkout, and the services that run it declare `pull_policy: never` so that a
+pull-driven path — `docker compose pull`, or a deploy script that pulls before it
+starts — leaves it alone and fetches only the third-party images (`guacd`,
+`guacamole`, the gateway). Without that, pulling asks Docker Hub for a repository
+called `ontrak` and fails with `pull access denied for ontrak, repository does
+not exist or may require 'docker login'`, which reads as a credentials problem and
+is not one. If you *do* ship the image — `ONTRAK_IMAGE=ghcr.io/you/ontrak:tag` —
+set `ONTRAK_PULL_POLICY=missing` (or `always`) so a deploy can fetch it.
+
 ## Troubleshooting
 
 **`/admin` shows "Hypervisor reads failed".** The panel is telling you exactly
@@ -304,6 +314,15 @@ daemon) — install Incus on that host with `sudo infra/bootstrap-host.sh`, or u
 the remote overlay, or demo mode. If Docker *is* on the lab host and it still
 says that, check for a stale image first: `make up` (which passes `--build`)
 rather than a bare `docker compose up` after a `git pull`.
+
+**`docker compose pull` fails with "pull access denied for ontrak".** It is
+trying to fetch the image this checkout builds (`ontrak:local`), which is not in
+any registry. The stack declares `pull_policy: never` for its own image, so on a
+current checkout `pull` skips it and pulls only `guacd`, `guacamole` and the
+gateway; a machine still seeing this is running an older `docker-compose.yml`.
+`docker compose build && docker compose up -d` is the supported way to get that
+image. A deployment that genuinely runs a registry image sets
+`ONTRAK_IMAGE=…` and `ONTRAK_PULL_POLICY=missing`.
 
 **The host step failed and I want to see the output again.** It is in
 `docker compose logs lab-setup`, and the last line names the script *by its path

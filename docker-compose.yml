@@ -58,6 +58,16 @@ services:
     # reads as an image problem and is a compose declaration problem. `portal` is
     # the one service that builds it; this one only uses it.
     image: ${ONTRAK_IMAGE:-ontrak:local}
+    # ... and neither may be *pulled*, which is the other half of "only uses it".
+    # `ontrak:local` is built here; it is not a registry repository, so any path
+    # that pulls — `docker compose pull`, or a deploy script that pulls before it
+    # starts — asks Docker Hub for a repository called `ontrak` and dies with
+    # "pull access denied for ontrak, repository does not exist or may require
+    # 'docker login'", which reads as a credentials problem and is a declaration
+    # problem. `never` is the honest answer for both services (see `portal`), and
+    # a deployment that really does run a registry image opts back in with
+    # ONTRAK_PULL_POLICY=missing (.env.example).
+    pull_policy: ${ONTRAK_PULL_POLICY:-never}
     container_name: ontrak-lab-setup
     restart: "no"
     entrypoint: ["/app/docker/lab-setup.sh"]
@@ -119,6 +129,11 @@ services:
       context: .
       dockerfile: Dockerfile
     image: ${ONTRAK_IMAGE:-ontrak:local}
+    # Not fetched either: `docker compose pull` pulls *every* service's image, so
+    # leaving this one on the default would still fail on the locally built tag
+    # even with lab-setup fixed. `never` leaves the third-party images to be
+    # pulled and the project's own to be built.
+    pull_policy: ${ONTRAK_PULL_POLICY:-never}
     container_name: ontrak-portal
     restart: unless-stopped
     init: true
