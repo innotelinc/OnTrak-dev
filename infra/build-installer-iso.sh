@@ -69,6 +69,22 @@ need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required ($2)"; }
 
 mkdir -p "$CACHE" "$WORK" "$(dirname "$OUT")"
 
+# --------------------------------------------------------------- one build --
+# Two builds must not share a work tree. The second one starts with `rm -rf` and
+# re-extracts, so the first repacks a tree with holes in it: xorriso says "File …
+# can't be opened. Filling with 0s" for whichever files it has not rewritten yet,
+# and the result is an image that boots, installs, and cannot fetch its own pool.
+# That is a real way to lose an hour, and it is not hypothetical: a launch script
+# that looked failed (a flaky host, a dropped connection) was retried while the
+# first build was still running, and the only sign of it was a corrupt image.
+# An exclusive lock turns that into a clear message for the second run.
+LOCK="$CACHE/.build.lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK"
+  flock -n 9 || die "another build is already using $CACHE.
+    Wait for it, or build somewhere else: ONTRAK_ISO_CACHE=/some/other/dir"
+fi
+
 # ------------------------------------------------------------------ xorriso --
 # xorriso is the one tool that has to be recent: Ubuntu's own ISO is a
 # BIOS+UEFI+isohybrid image, and `-report_el_torito as_mkisofs` is what makes the
