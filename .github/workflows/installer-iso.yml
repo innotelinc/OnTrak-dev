@@ -55,7 +55,7 @@ on:
         type: boolean
         default: false
       install:
-        description: Also install a machine from the image and check it (needs KVM, ~15 min)
+        description: Also install a machine from the image and check it (needs a runner with /dev/kvm)
         type: boolean
         default: false
 
@@ -223,10 +223,14 @@ jobs:
             ${{ runner.temp }}/iso-cache/work/smoke/serial.log
           retention-days: 14
 
-      # The whole thing: install a machine from the image and sign in to it. The
-      # Linux runners have /dev/kvm, which is what makes this possible here at all
-      # — the range host is a nested container on a shared box and has no usable
-      # one. Manual, because it is a quarter of an hour.
+      # The whole thing: install a machine from the image and sign in to it.
+      #
+      # This step needs a runner with /dev/kvm, and GitHub's hosted runners do not
+      # have one — a run here fails at the test's own guard with "no usable
+      # /dev/kvm", which is the honest outcome rather than a job that pretends for
+      # fifteen minutes. It is kept because a self-hosted runner does have one, and
+      # because the guard is what tells you that you are on the wrong machine.
+      # Manual, because it is a quarter of an hour.
       - name: Install a machine and check it
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.install }}
         env:

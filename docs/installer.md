@@ -133,12 +133,15 @@ make installer-iso-test                       # the newest ISO in dist/
 bash infra/installer/install-test.sh dist/ontrak-installer-24.04.5-amd64.iso
 ```
 
-It needs KVM (an install under software emulation takes hours, and the test says so
-rather than pretending). The disk and logs are kept when it fails, so the
-`screendump` of the installer's screen and the console log are there to read. In CI it
-is a manual dispatch — *Installer ISO* → *Run workflow* → *install* — because it takes
-about a quarter of an hour; GitHub's Linux runners have `/dev/kvm`, which is what
-makes it possible there and not on the range host.
+It needs KVM — an install under software emulation takes hours, and the test says so
+rather than pretending. The disk and logs are kept when it fails, so the `screendump` of
+the installer's screen and the console log are there to read.
+
+In CI it is a manual dispatch — *Installer ISO* → *Run workflow* → *install* — but
+GitHub's **hosted** runners have no `/dev/kvm`: a run there stops at the test's own
+guard, which is the honest outcome rather than a job that pretends for fifteen minutes.
+It is wired up for a self-hosted runner that has one; until then, run it where KVM
+actually is — on the range host itself.
 
 ## Troubleshooting
 
@@ -147,6 +150,7 @@ makes it possible there and not on the range host.
 | The installer asks every question | the boot entry did not get the autoinstall: check the `ds=nocloud` line the build printed, and `/nocloud` on the ISO |
 | "Waiting for the autoinstall to be fetched by subiquity" never clears | the ISO was written with a tool that stripped the `appended partition`/MBR area — write it with `dd`, or boot it as virtual media |
 | The install ends powered off | `shutdown` in `autoinstall/user-data.dist` was changed; the reboot is what runs the first-boot unit |
+| `install-test.sh` refuses to start | no usable `/dev/kvm` on that machine — it is not a bug, it is the test declining to spend hours emulating one install (`ONTRAK_INSTALL_TEST_ALLOW_TCG=1` accepts the slow path) |
 | First boot says the hypervisor is not ready | no `/dev/kvm`: enable VT-x/AMD-V, or nested virtualisation in a VM — then `sudo /usr/local/sbin/ontrak-firstboot.sh --force` |
 | First boot cannot clone | a private remote without `ONTRAK_GIT_TOKEN`; the script prints the token it wants |
 | `make up` fails in the first boot | usually no internet for the image build, or a port already bound — `cd /opt/ontrak && docker compose logs` |
