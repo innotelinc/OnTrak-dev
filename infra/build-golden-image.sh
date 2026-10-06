@@ -61,6 +61,13 @@ BUILD_VM="${ONTRAK_BUILD_VM:-ontrak-golden-build}"
 PACK_VM="${ONTRAK_PACK_VM:-ontrak-winpack-build}"
 PY="${PROJECT_ROOT}/.venv/bin/python"
 
+# The rewrites this range makes to incus-windows' tools/pack.sh. They live in
+# their own file so a test can run them without a host (see
+# scripts/tests/test_pack_sh_rewrites.py), and each one is idempotent, because a
+# failed build is re-run against the same checkout.
+# shellcheck source=incus-windows-pack.sh
+. "${PROJECT_ROOT}/infra/incus-windows-pack.sh"
+
 log()  { printf '\033[36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[!]\033[0m %s\n' "$*"; }
 die()  { printf '\033[31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -100,6 +107,40 @@ if [[ "${ONTRAK_GOLDEN_ALLOW_NESTED:-}" != "1" ]] \
   die "this host looks like nested AMD KVM ($(systemd-detect-virt)), which cannot virtualise SMM: the build VM dies at 'KVM: entry failed, hardware error 0xffffffff' (SMM=1) as soon as Windows Setup boots, and 'smm=off' only hangs it. Build the image where KVM is not nested -- bare-metal Linux, or a cloud VM with nested virtualisation -- then copy it in (see docs/operations.md, 'Building the golden image on a nested host'). Set ONTRAK_GOLDEN_ALLOW_NESTED=1 to try anyway."
 fi
 
+# ------------------------------------------------ automatic updates preflight --
+# The build takes hours, and it is not the only thing the host is doing. On stock
+# Ubuntu, unattended-upgrades is armed and apt-daily.timer /
+# apt-daily-upgrade.timer are enabled; an upgrade that touches incus, qemu or
+# libvirt restarts the daemon underneath the build.
+#
+# Not hypothetical: it is what ended this project's first build on i2. The VM had
+# applied Windows and booted it through three setup passes when an unattended
+# `apt-get --only-upgrade` of qemu and ovmf landed at 00:57. `systemctl stop
+# incus` followed four seconds later, click.py's next poll of `incus ls` failed,
+# and pack.sh's EXIT trap deleted the instance. Nothing had gone wrong with
+# Windows.
+#
+# The disk no longer dies with the daemon — that trap is removed below, and a
+# failed build keeps its VM — so this is a warning rather than a refusal: the run
+# can still be rescued by publishing what was kept. But a restart costs the hours
+# already spent, so name the timers and let the operator stop them.
+if command -v systemctl >/dev/null; then
+  armed=()
+  for unit in apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service; do
+    if systemctl is-enabled --quiet "$unit" 2>/dev/null || systemctl is-active --quiet "$unit" 2>/dev/null; then
+      armed+=("$unit")
+    fi
+  done
+  if [[ ${#armed[@]} -gt 0 ]]; then
+    warn "this host has automatic updates armed: ${armed[*]}"
+    warn "  An upgrade that touches incus, qemu or libvirt restarts them and ends this run."
+    warn "  Stop them for the length of the build (they come back at the next boot):"
+    warn "    systemctl stop ${armed[*]}"
+    warn "  A restart no longer destroys the installed disk — see docs/operations.md,"
+    warn "  'Recovering a build VM that was kept' — but it does cost the hours so far."
+  fi
+fi
+
 if [[ "$REF" == "main" ]]; then
   warn "ONTRAK_INCUS_WINDOWS_REF is 'main'. Pin a tag or commit for reproducible builds:"
   warn "  ONTRAK_INCUS_WINDOWS_REF=<tag-or-sha> infra/build-golden-image.sh"
@@ -118,107 +159,56 @@ else
 fi
 
 # ------------------------------------------------------------ build VM sizing --
-# The builder sizes its own build VM at 4 vCPU / 8 GB (tools/pack.sh). On a range
-# host with four cores that is *every* core it has, and Windows Setup uses them: the
-# host keeps answering ping and accepting TCP while nothing in user space is
-# scheduled, so sshd and the portal never reply and the lab is down for the length
-# of the build. That is not a guess — it is what this script did to a 4 vCPU host,
-# which was unreachable for hours with the build still running. The sizing is
-# rewritten here so the host stays usable. Raise it where there are cores to spare.
+# The builder sizes its own build VM at 4 vCPU / 8 GB (tools/pack.sh), which on a
+# four-core range host is *every* core it has: Windows Setup then starves sshd and
+# the portal, and the host is unreachable for hours with the build still running.
+# That is measured, not feared. The rewrite, and the rest of the reasoning, is in
+# infra/incus-windows-pack.sh.
 BUILD_CPUS="${ONTRAK_GOLDEN_CPUS:-2}"
 BUILD_MEMORY="${ONTRAK_GOLDEN_MEMORY:-6GB}"
-if sed -i -E "s/-c limits\.cpu=[0-9]+ -c limits\.memory=[0-9]+G?B?/-c limits.cpu=${BUILD_CPUS} -c limits.memory=${BUILD_MEMORY}/" "$CHECKOUT/tools/pack.sh" \
-   && grep -q -- "-c limits.cpu=${BUILD_CPUS} -c limits.memory=${BUILD_MEMORY}" "$CHECKOUT/tools/pack.sh"; then
+if pack_vm_size "$CHECKOUT/tools/pack.sh" "$BUILD_CPUS" "$BUILD_MEMORY"; then
   log "build VM sized at ${BUILD_CPUS} vCPU / ${BUILD_MEMORY} (ONTRAK_GOLDEN_CPUS / ONTRAK_GOLDEN_MEMORY)"
 else
   warn "could not size the build VM: tools/pack.sh no longer matches (it is a pinned third-party checkout, so this is a change to re-read) — it will take the host's defaults"
 fi
 
 # ------------------------------------------------- build disk write cache --
-# Incus hands a VM disk to qemu with the "writeback" cache by default, so every
-# block the guest writes is charged to the host page cache *and* to the
-# container's memory cgroup. Applying the ~7 GiB Windows image that way is what
-# made the first three builds fail: the cgroup reached its limit and the kernel
-# OOM-killed qemu in the middle of the apply.
-#
-# The failure then hides itself. tools/click.py (a pinned third-party tool) waits
-# for `incus ls` to report STOPPED and treats that as "the installer finished" —
-# it cannot tell a clean sysprep shutdown from a killed process — so pack.sh goes
-# on to publish and export the half-applied disk as if it were a golden image.
-# A qemu kill is therefore silent: you get an image whose ESP has no Windows boot
-# files, and every Windows template built from it fails much later.
-#
-# Bypassing the host write cache for the build disk removes the memory pressure
-# that caused the kill, which is the fix that actually matters. (ONTRAK_GOLDEN_CPUS
-# / ONTRAK_GOLDEN_MEMORY above bound the guest's own RAM for the same reason.)
-# Insert only if absent. The line was appended on every run at first, so a second
-# run (after a failed build) added `io.cache=none` again -- once per run.
-if ! grep -q 'root io.cache=none' "$CHECKOUT/tools/pack.sh"; then
-  sed -i '/^incus config device set "${name}" root io.bus=virtio-blk$/a incus config device set "${name}" root io.cache=none' "$CHECKOUT/tools/pack.sh"
-fi
-if grep -q 'root io.cache=none' "$CHECKOUT/tools/pack.sh"; then
+# qemu's writeback default charges every block the guest writes to the host page
+# cache *and* to the container's memory cgroup. Applying the ~7 GiB Windows image
+# that way had the kernel OOM-kill qemu mid-apply, and it was silent: click.py
+# reads the kill as a finished install, and pack.sh publishes the half-applied
+# disk as if it were a golden image. infra/incus-windows-pack.sh has the rest, and
+# the test that keeps the rewrite applying exactly once.
+if pack_disk_cache_none "$CHECKOUT/tools/pack.sh"; then
   log "build disk set to io.cache=none (keeps the Windows image apply out of the host page cache)"
 else
   warn "could not set io.cache=none on the build disk: tools/pack.sh no longer matches — on a 16 GiB range host, expect the OOM kill described above"
 fi
 
 # ---------------------------------------------------- build disk (and image) ----
-# tools/pack.sh creates its build VM at 30 GiB and then grows the disk to 60 GiB
-# before the install. That size is not just the build VM's: `incus publish` tars
-# the *apparent* disk into the image — it does not skip holes, and on this host it
-# is not even gzip's input size that matters, because a Linux guest's partition
-# table is the whole disk by construction.
-#
-# What that costs was measured, not guessed. Publishing a 60 GiB build disk with
-# --compression none wrote for fourteen minutes and then failed with "Failed to
-# begin transaction: context deadline exceeded" — the image store and Incus's own
-# cowsql database share one dataset, and the copy starves the database's leader
-# election. The daemon's DB is left unusable, every `incus` command times out, and
-# the fully-installed Windows disk has to be recovered by hand. It happened twice.
-#
-# A Windows 11 install needs ~20 GiB, so 32 GiB is plenty of headroom and the
-# published image is half the size. Raise it only if a scenario's media needs it.
-#
-# The size is applied where the disk is *created*, not by resizing it afterwards.
-# Growing an existing volume is a separate path in the daemon, and it has its own
-# way of going wrong: on a btrfs pool whose qgroups are flagged inconsistent,
-# `incus config device set <vm> root size=...` blocks inside the daemon forever —
-# the operation is not cancelable — and the build parks at "Device tpm added" for
-# as long as you leave it. Sizing at creation takes the path that has always
-# worked, so the resize is removed rather than called.
+# pack.sh creates the build disk at 30 GiB and grows it to 60 GiB before the
+# install, and `incus publish` tars the *apparent* disk into the image — 60 GiB
+# costs fourteen minutes of publishing and then wedges Incus's own database. A
+# Windows 11 install needs ~20 GiB, so 32 GiB of headroom halves the image. The
+# size is applied where the disk is created and the later resize is deleted rather
+# than called, because growing a volume is the operation that blocks forever on a
+# pool with inconsistent qgroups. The measurements are in infra/incus-windows-pack.sh.
 BUILD_DISK="${ONTRAK_GOLDEN_DISK:-32GiB}"
-if sed -i -E "s/-d root,size=[0-9]+GiB/-d root,size=${BUILD_DISK}/" "$CHECKOUT/tools/pack.sh" \
-   && sed -i -E "/^[[:space:]]*incus config device set .* root size=[0-9]+GiB[[:space:]]*$/d" "$CHECKOUT/tools/pack.sh" \
-   && grep -q -- "root,size=${BUILD_DISK}" "$CHECKOUT/tools/pack.sh"; then
+if pack_disk_size "$CHECKOUT/tools/pack.sh" "$BUILD_DISK"; then
   log "build disk sized at ${BUILD_DISK} when it is created (ONTRAK_GOLDEN_DISK) — this is also the published image's disk"
 else
   warn "could not size the build disk: tools/pack.sh no longer matches — expect a 60 GiB image, a long publish, and possibly a wedged Incus database"
 fi
 
 # --------------------------------------------- what keeps the installed disk --
-# tools/pack.sh names its build VM with six random bytes and deletes it from an EXIT
-# trap:
-#
-#     name=build$(head -c6 /dev/urandom | ...)
-#     cleanup() { incus image rm "${name}" || :; incus delete -f "${name}"; }
-#     trap cleanup EXIT INT QUIT TERM
-#
-# Both halves are a problem for a build this long. The random name means that after
-# a failure there is no name to hand to the operator; the unconditional trap means
-# *any* exit deletes the disk, including exits that have nothing to do with Windows.
-# That was measured the expensive way. A build that had applied Windows to disk and
-# booted it through three setup passes was destroyed after roughly three hours
-# because an unrelated `apt` upgrade on the same host restarted incus; click.py's
-# next poll of `incus ls` then failed, and pack.sh's trap deleted the instance on the
-# way out. Nothing had gone wrong with Windows.
-#
-# So the name is pinned and the delete is removed here. The VM is therefore left in
-# place whenever the build fails, where its disk can be published by hand, and this
-# script removes it itself once the image has really been imported.
-if sed -i -E "s|^name=build.*|name=${PACK_VM}|" "$CHECKOUT/tools/pack.sh" \
-   && sed -i -E '/^[[:space:]]*incus delete -f /d' "$CHECKOUT/tools/pack.sh" \
-   && grep -q "^name=${PACK_VM}$" "$CHECKOUT/tools/pack.sh" \
-   && ! grep -qE '^[[:space:]]*incus delete -f ' "$CHECKOUT/tools/pack.sh"; then
+# pack.sh names its build VM with six random bytes and deletes it from an
+# unconditional EXIT trap, so *any* exit — including an unrelated `apt` upgrade
+# restarting incus — throws away a disk that may hold three hours of Windows.
+# That is measured: it is what ended this project's first build on i2. So the name
+# is pinned, the delete is removed, and the VM is left in place for an operator to
+# publish by hand; this script removes it once the image has really been imported.
+# infra/incus-windows-pack.sh carries the account of the incident.
+if pack_keep_vm "$CHECKOUT/tools/pack.sh" "$PACK_VM"; then
   log "build VM pinned to ${PACK_VM}, and kept until the image is imported (ONTRAK_PACK_VM)"
 else
   warn "could not pin the build VM in tools/pack.sh: it no longer matches — a failed build will delete the installed disk after all, and any leftover VM will have a random name"
@@ -241,13 +231,13 @@ if [[ "${ONTRAK_GOLDEN_NO_SECUREBOOT:-}" =~ ^(1|true|yes|on)$ ]]; then
   warn "  a production golden image."
 
   # 1. Keep pack.sh from giving the build VM a TPM and Secure Boot. Off means off:
-  #    no TPM device, security.secureboot=false.
-  sed -i -E 's|^([[:space:]]*)incus config device add .* tpm tpm[[:space:]]*$|\1# ONTRAK_NO_SECUREBOOT: no TPM on the build VM|' "$CHECKOUT/tools/pack.sh"
-  sed -i -E 's|^([[:space:]]*)incus config set .* security\.secureboot=true[[:space:]]*$|\1# ONTRAK_NO_SECUREBOOT: no Secure Boot on the build VM|' "$CHECKOUT/tools/pack.sh"
-  if grep -qE '^[[:space:]]*incus config (device add .* tpm tpm|set .* security\.secureboot=true)' "$CHECKOUT/tools/pack.sh"; then
-    warn "could not disable TPM/Secure Boot in tools/pack.sh: it no longer matches — the build will still need SMM"
-  else
+  #    no TPM device, no later security.secureboot=true. The secureboot=false that
+  #    upstream puts on `incus init` is its own default and is left alone;
+  #    infra/incus-windows-pack.sh has both edits.
+  if pack_no_secureboot "$CHECKOUT/tools/pack.sh"; then
     log "build VM set to run without TPM and without Secure Boot"
+  else
+    warn "could not disable TPM/Secure Boot in tools/pack.sh: it no longer matches — the build will still need SMM"
   fi
 
   # 2. Let Windows Setup install past the checks it can no longer satisfy.

@@ -368,6 +368,37 @@ plus twelve hex digits; `incus list` shows it. Either way, a new run refuses to
 start while a build VM is still there — because deleting it might be deleting a
 finished install — unless `ONTRAK_DISCARD_BUILD_VM=1` says to throw it away.
 
+Two variations are worth knowing, because they are the cheap ones.
+
+**The install can finish and only the export fail.** After exporting, `pack.sh`
+extracts `rootfs.img` out of the tarball it just wrote, which needs as much free
+space as the disk is big — on the build host's *root* filesystem, not on the Incus
+pool. Running out of space there leaves a truncated `rootfs.img` *and* an intact
+export tarball, and the publish and the export have already happened, so the image
+is fine. Nothing about that is a failed install; check the fingerprint `incus
+publish` printed in the log before assuming the install has to be repeated.
+
+**Split the tarball where there is room.** `incus image export` writes one unified
+`.tar`, and splitting it back into `incus.tar.xz` + `disk.qcow2` does not have to
+happen on the build host — which is usually the one short of space. Copy it to the
+range host and split it there:
+
+```bash
+rsync -a --info=progress2 root@builder:/root/ontrak/build/incus-windows/output/win11e/<fingerprint>.tar /tmp/one.tar
+mkdir -p /tmp/golden-export && cd /tmp/golden-export
+cp /tmp/one.tar one.tar
+mkdir split && tar -C split -xf one.tar metadata.yaml rootfs.img
+( cd split && tar -cJf ../incus.tar.xz metadata.yaml )
+mv split/rootfs.img disk.qcow2
+rm -rf split one.tar /tmp/one.tar
+
+make golden-import ARGS=/tmp/golden-export
+```
+
+Whichever way the image arrives, `make golden-import` verifies the disk before it
+publishes anything, so a truncated transfer or a half-applied install is refused
+rather than published.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -378,7 +409,8 @@ finished install — unless `ONTRAK_DISCARD_BUILD_VM=1` says to throw it away.
 | `make golden` stops immediately with `this host looks like nested AMD KVM ... cannot virtualise SMM` | the host is itself a guest on an AMD CPU (e.g. WSL2/Hyper-V on a Ryzen), and nested AMD SVM cannot virtualise SMM — Windows 11 Setup needs it | Build on a host where KVM is **not** nested and copy the image in; see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host). `ONTRAK_GOLDEN_ALLOW_NESTED=1` skips the check, but the build then dies with `KVM: entry failed, hardware error 0xffffffff` |
 | `make golden` fails seconds in, and the build VM's qemu log ends `KVM: entry failed, hardware error 0xffffffff` with `SMM=1` | the host cannot virtualise SMM and Windows 11 Setup needs it. Disabling Secure Boot and the TPM does not help (OVMF uses SMM for its runtime services regardless), and `-machine smm=off` hangs the guest instead | Move the build to a host where KVM is not nested — see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host) |
 | `ontrak template build` fails with `incus list --format=json failed (124): timed out after 120s`, even though `ONTRAK_INCUS__OPERATION_TIMEOUT_SECONDS` is raised | the plumbing used to fall back to its own 120 s default for reads, ignoring the operator's setting. `incus list` is not a cheap read on a busy host: it reports each instance's state, agent status and address, so it blocks for minutes on a VM that is still booting | Fixed — the configured timeout is the ceiling for every call. If you are on an older build, raise the default in `incus.py` or pacify the host first |
-| `make golden` fails after a long install with `Error: Failed to begin transaction: sql: database is closed`, then `incus ls` fails with `Error: Image not found`, and the build VM is gone | something on the host restarted `incus` while the build was running, and `tools/pack.sh` deleted its build VM from an EXIT trap on the way out. An unattended `apt` upgrade is enough: `unattended-upgrades` and `apt-daily*.timer` are enabled by default, `ovmf`/`qemu-efi-*` upgrades are routine, and the restart kills a running build | Current builds keep the VM (`ontrak-winpack-build`) so the installed disk survives, and a new run stops rather than overwrite it — recover with [Recovering a build VM that was kept](#recovering-a-build-vm-that-was-kept) instead of rebuilding. The script does not disable the host's update timers: schedule the build away from them, or mask `apt-daily-upgrade.timer` for the run |
+| `make golden` fails after a long install with `Error: Failed to begin transaction: sql: database is closed`, then `incus ls` fails with `Error: Image not found`, and the build VM is gone | something on the host restarted `incus` while the build was running, and `tools/pack.sh` deleted its build VM from an EXIT trap on the way out. An unattended `apt` upgrade is enough: `unattended-upgrades` and `apt-daily*.timer` are enabled by default, `ovmf`/`qemu-efi-*` upgrades are routine, and the restart kills a running build | Current builds keep the VM (`ontrak-winpack-build`) so the installed disk survives, and a new run stops rather than overwrite it — recover with [Recovering a build VM that was kept](#recovering-a-build-vm-that-was-kept) instead of rebuilding. The script does not *disable* the host's update timers, but it does name the ones it finds at the start of a build and tell you to stop them; they return at the next boot, which is deliberate — a build should not leave a range's security updates off |
+| `make golden` gets all the way through the install and the export, then fails with `tar: rootfs.img: Wrote only 512 of 10240 bytes`, and the published image has vanished from `incus image list` | `tools/pack.sh` extracts the disk back out of the export tarball when it is finished, and the build host's **root** filesystem ran out of space doing it — not the Incus pool, which is usually a separate disk. `pack.sh`'s `EXIT` trap then removes the image it had just published, so what is left is a complete export tarball and a truncated `rootfs.img` | Recover, do not rebuild — the tarball *is* the image, and the install is finished. See [Recovering a build VM that was kept](#recovering-a-build-vm-that-was-kept) |
 | `pywinrm` errors with 401 | wrong training password, or the account is not a local admin | Compare with `guest.password`; the image sets `LocalAccountTokenFilterPolicy=1` so elevation should work |
 | Template build fails with "never obtained an address" | wrong bridge or DHCP range exhausted | `incus network get ontrak0 ipv4.dhcp.ranges`; widen the range for large classes |
 | Template build fails with "did not report ONTRAK-SETUP-OK" | the setup script threw | The error includes the output tail; run the VM manually and execute `setup.ps1` to see the full error |
@@ -530,13 +562,18 @@ Three details that are not obvious:
   host](#building-the-golden-image-on-a-nested-host).
 * **Third-party build tool:** `antifob/incus-windows` automates the unattended
   Windows install. Pin a commit (`ONTRAK_INCUS_WINDOWS_REF`) — it is a build-time
-  dependency, not a runtime one, and its interface changes between versions. Two of
-  its behaviours have bitten this stack and are worked around in
-  `infra/build-golden-image.sh`: it sizes its build VM at the whole host (rewritten
+  dependency, not a runtime one, and its interface changes between versions. Four of
+  its behaviours have bitten this stack and are rewritten in
+  `infra/incus-windows-pack.sh`: it sizes its build VM at the whole host (rewritten
   to `ONTRAK_GOLDEN_CPUS`/`ONTRAK_GOLDEN_MEMORY`), it grows the build disk to 60 GiB
   (rewritten to `ONTRAK_GOLDEN_DISK`, because that disk becomes the published image),
-  and its `tools/click.py` treats any stop as a finished install, so a killed build
-  publishes silently — see the golden-image rows above.
+  it leaves that disk on the host write cache, and it names its build VM with six
+  random bytes and deletes it from an unconditional `EXIT` trap. Its `tools/click.py`
+  also treats any stop as a finished install, so a killed build publishes silently —
+  see the golden-image rows above. Those rewrites live in their own file so they can
+  be tested without a hypervisor (`scripts/tests/test_pack_sh_rewrites.py`): a rewrite
+  whose anchor has moved warns, rather than running a two-hour build with upstream's
+  defaults.
 
 ## Legacy platform notes
 
