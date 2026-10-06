@@ -64,10 +64,13 @@ log "KVM available"
 # ------------------------------------------------------------------ packages --
 export DEBIAN_FRONTEND=noninteractive
 log "installing packages"
+# qemu-system-x86, not qemu-kvm: the qemu-kvm name was retired and has no
+# installation candidate on Ubuntu 24.04 or 26.04 any more, so naming it failed
+# the whole apt call — and with `set -e`, the bootstrap — on a first run.
 apt-get update -qq
 apt-get install -y --no-install-recommends \
   ca-certificates curl gnupg jq \
-  qemu-kvm qemu-utils \
+  qemu-system-x86 qemu-utils \
   xorriso genisoimage \
   python3-venv python3-pip \
   >/dev/null

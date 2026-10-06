@@ -168,10 +168,19 @@ fi
 #
 # A Windows 11 install needs ~20 GiB, so 32 GiB is plenty of headroom and the
 # published image is half the size. Raise it only if a scenario's media needs it.
+#
+# The size is applied where the disk is *created*, not by resizing it afterwards.
+# Growing an existing volume is a separate path in the daemon, and it has its own
+# way of going wrong: on a btrfs pool whose qgroups are flagged inconsistent,
+# `incus config device set <vm> root size=...` blocks inside the daemon forever —
+# the operation is not cancelable — and the build parks at "Device tpm added" for
+# as long as you leave it. Sizing at creation takes the path that has always
+# worked, so the resize is removed rather than called.
 BUILD_DISK="${ONTRAK_GOLDEN_DISK:-32GiB}"
-if sed -i -E "/^\s*incus config device set .*root size=[0-9]+GiB/s/root size=[0-9]+GiB/root size=${BUILD_DISK}/" "$CHECKOUT/tools/pack.sh" \
-   && grep -q -- "root size=${BUILD_DISK}" "$CHECKOUT/tools/pack.sh"; then
-  log "build disk sized at ${BUILD_DISK} (ONTRAK_GOLDEN_DISK) — this is also the published image's disk"
+if sed -i -E "s/-d root,size=[0-9]+GiB/-d root,size=${BUILD_DISK}/" "$CHECKOUT/tools/pack.sh" \
+   && sed -i -E "/^[[:space:]]*incus config device set .* root size=[0-9]+GiB[[:space:]]*$/d" "$CHECKOUT/tools/pack.sh" \
+   && grep -q -- "root,size=${BUILD_DISK}" "$CHECKOUT/tools/pack.sh"; then
+  log "build disk sized at ${BUILD_DISK} when it is created (ONTRAK_GOLDEN_DISK) — this is also the published image's disk"
 else
   warn "could not size the build disk: tools/pack.sh no longer matches — expect a 60 GiB image, a long publish, and possibly a wedged Incus database"
 fi
