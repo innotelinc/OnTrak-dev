@@ -249,6 +249,7 @@ for the whole class: a cluster does not make a cold Windows boot faster.
 | --- | --- |
 | Refresh the Windows image (patches, expired eval) | `make golden` — rebuilds and republishes `ontrak-win-base`, then rebuild templates |
 | Publish a golden image built on another host | `make golden-import ARGS=/path/to/export` — checks the disk is a finished install, then imports it as `ontrak-win-base`. See [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host) |
+| A build failed and left its VM behind | `incus list ontrak-winpack-build` — a failed build keeps its VM on purpose, because the disk may hold a finished install. See [Recovering a build VM that was kept](#recovering-a-build-vm-that-was-kept) |
 | Scenario edited | `make validate && .venv/bin/ontrak template build <id> --force` |
 | Templates regenerated | Pool VMs built from the old template keep running; end their sessions or let the reaper recycle them |
 | Leaked instances | `incus --project ontrak list` and delete anything that is not `tpl-*` or an active session; `ontrak stats` shows the state counts |
@@ -312,16 +313,72 @@ the range clones it — there is nothing missing. Where the image *is* needed it
 still reports `golden image 'ontrak-win-base' missing` and fails, and Windows
 sessions cannot start. Both are accurate, and neither is a bug.
 
+### Recovering a build VM that was kept
+
+`infra/build-golden-image.sh` pins incus-windows' own build VM to a fixed name
+(`ONTRAK_PACK_VM`, default `ontrak-winpack-build`) and removes the `incus delete`
+from the EXIT trap in `tools/pack.sh`. So a build that fails does **not** delete its
+VM: it stays in Incus' `default` project and its disk holds whatever Windows had
+installed. That matters because a build is hours long and most of what kills it has
+nothing to do with Windows — an unrelated package upgrade restarting `incus` is
+enough.
+
+Look at what survived before deciding to start again:
+
+```bash
+incus list ontrak-winpack-build          # still there? still running?
+incus info ontrak-winpack-build
+```
+
+If Windows did finish, publish that disk instead of rebuilding. `incus publish`
+must use `--compression none`: that is what makes the image export a plain `.tar`
+holding `metadata.yaml` and `rootfs.img`, which is the layout everything below
+expects.
+
+```bash
+incus start ontrak-winpack-build          # only if it stopped mid-Setup
+incus stop ontrak-winpack-build --timeout 120
+incus publish ontrak-winpack-build --alias win11e-local \
+  --compression none requirements.cdrom_agent=true
+
+# the export is a single tarball, named after the image fingerprint
+mkdir -p ./golden-export && incus image export win11e-local ./golden-export
+cp ./golden-export/*.tar ./golden-export/one.tar
+```
+
+Two details make that recipe worth spelling out. The export tarball is named after
+the image fingerprint, so it has to be renamed before it can be globbed. And
+`make golden-import` wants a *split* image — `incus.tar.xz` (the metadata tarball,
+i.e. `metadata.yaml` on its own) plus `disk.qcow2` — while `incus image export`
+writes a single *unified* tarball, so the two halves have to be split back out:
+
+```bash
+mkdir -p ./golden-export/split
+tar -C ./golden-export/split -xf ./golden-export/one.tar metadata.yaml rootfs.img
+( cd ./golden-export/split && tar -cJf ../incus.tar.xz metadata.yaml )
+mv ./golden-export/split/rootfs.img ./golden-export/disk.qcow2
+rm -rf ./golden-export/split ./golden-export/one.tar
+
+make golden-import ARGS=./golden-export        # verifies the disk, imports it
+incus delete ontrak-winpack-build --force      # done with the build VM
+```
+
+A build VM left over from a version before the name was pinned is called `build`
+plus twelve hex digits; `incus list` shows it. Either way, a new run refuses to
+start while a build VM is still there — because deleting it might be deleting a
+finished install — unless `ONTRAK_DISCARD_BUILD_VM=1` says to throw it away.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | Session sits in `provisioning`, then `error` | guest transport never answered | Check `session.error` on the page, then `ONTRAK_INCUS__REMOTE=... incus --project ontrak info <instance>`; confirm the guest has an IP on `ontrak0`. If RDP is up but WinRM is not, the image's `post-install.ps1` step did not run — rebuild the golden image. |
 | `make golden` reports success but every Windows template then hangs at the firmware boot prompt, and `ontrak doctor` still says the golden image is present | the ISO install was OOM-killed and the half-applied disk was published as the image. Incus gives a VM disk the host write cache by default, so applying the ~7 GiB Windows image is charged to the container's memory cgroup; on a 16 GiB range host the kernel kills qemu part-way through the apply. The pinned builder (`tools/click.py`) then only waits for `incus ls` to report STOPPED — it cannot tell that kill from the clean sysprep shutdown it expects — and `pack.sh` publishes the truncated disk anyway | `infra/build-golden-image.sh` now sets the build disk to `io.cache=none` and bounds the guest RAM (`ONTRAK_GOLDEN_CPUS`/`ONTRAK_GOLDEN_MEMORY`), which removes the pressure that caused the kill. Re-run `make golden`. To check a suspect image, inspect its ESP: a formatted-but-empty ESP (no `EFI/Microsoft/Boot/bootmgfw.efi`) means the apply never finished |
-| `make golden` gets all the way through the install and then fails part-way through publishing, and from that point every `incus` command fails with `Failed to begin transaction: no available cowsql leader server found` or `context deadline exceeded` | `incus publish` tars the build disk's *apparent* size into the image — holes are not skipped — and the image store shares a dataset with Incus's own cowsql database, so a long enough copy starves the database's leader election and takes the daemon's DB with it. The bigger the build disk, the worse it gets: a 60 GiB disk copied with `--compression none` ran for fourteen minutes before wedging the DB, and a 29 GiB one ran fifteen | Size the build disk small (already done: `ONTRAK_GOLDEN_DISK`, default 32 GiB) and let `incus publish` keep its default gzip (`--compression none` is the mistake, not the fix). If the DB is already wedged, `systemctl restart incus` clears it — the installed disk survives, so recover rather than rebuild: publish that instance instead of re-running the 30-60 minute install |
+| `make golden` gets all the way through the install and then fails part-way through publishing, and from that point every `incus` command fails with `Failed to begin transaction: no available cowsql leader server found` or `context deadline exceeded` | `incus publish` tars the build disk's *apparent* size into the image — holes are not skipped — and the image store shares a dataset with Incus's own cowsql database, so a long enough copy starves the database's leader election and takes the daemon's DB with it. The bigger the build disk, the worse it gets: a 60 GiB disk copied with `--compression none` ran for fourteen minutes before wedging the DB, and a 29 GiB one ran fifteen | Size the build disk small — that is the lever this script has, and it is already set (`ONTRAK_GOLDEN_DISK`, default 32 GiB). Note that the pinned builder publishes with `--compression none` on purpose: its export step extracts the disk from a plain `.tar`, and `incus image export` writes `<fingerprint>.tar.gz` when the image is gzipped, which that step cannot read. If the DB is already wedged, `systemctl restart incus` clears it — the installed disk survives, so recover rather than rebuild: publish that instance instead of re-running the 30-60 minute install |
 | `make golden` stops immediately with `this host looks like nested AMD KVM ... cannot virtualise SMM` | the host is itself a guest on an AMD CPU (e.g. WSL2/Hyper-V on a Ryzen), and nested AMD SVM cannot virtualise SMM — Windows 11 Setup needs it | Build on a host where KVM is **not** nested and copy the image in; see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host). `ONTRAK_GOLDEN_ALLOW_NESTED=1` skips the check, but the build then dies with `KVM: entry failed, hardware error 0xffffffff` |
 | `make golden` fails seconds in, and the build VM's qemu log ends `KVM: entry failed, hardware error 0xffffffff` with `SMM=1` | the host cannot virtualise SMM and Windows 11 Setup needs it. Disabling Secure Boot and the TPM does not help (OVMF uses SMM for its runtime services regardless), and `-machine smm=off` hangs the guest instead | Move the build to a host where KVM is not nested — see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host) |
 | `ontrak template build` fails with `incus list --format=json failed (124): timed out after 120s`, even though `ONTRAK_INCUS__OPERATION_TIMEOUT_SECONDS` is raised | the plumbing used to fall back to its own 120 s default for reads, ignoring the operator's setting. `incus list` is not a cheap read on a busy host: it reports each instance's state, agent status and address, so it blocks for minutes on a VM that is still booting | Fixed — the configured timeout is the ceiling for every call. If you are on an older build, raise the default in `incus.py` or pacify the host first |
+| `make golden` fails after a long install with `Error: Failed to begin transaction: sql: database is closed`, then `incus ls` fails with `Error: Image not found`, and the build VM is gone | something on the host restarted `incus` while the build was running, and `tools/pack.sh` deleted its build VM from an EXIT trap on the way out. An unattended `apt` upgrade is enough: `unattended-upgrades` and `apt-daily*.timer` are enabled by default, `ovmf`/`qemu-efi-*` upgrades are routine, and the restart kills a running build | Current builds keep the VM (`ontrak-winpack-build`) so the installed disk survives, and a new run stops rather than overwrite it — recover with [Recovering a build VM that was kept](#recovering-a-build-vm-that-was-kept) instead of rebuilding. The script does not disable the host's update timers: schedule the build away from them, or mask `apt-daily-upgrade.timer` for the run |
 | `pywinrm` errors with 401 | wrong training password, or the account is not a local admin | Compare with `guest.password`; the image sets `LocalAccountTokenFilterPolicy=1` so elevation should work |
 | Template build fails with "never obtained an address" | wrong bridge or DHCP range exhausted | `incus network get ontrak0 ipv4.dhcp.ranges`; widen the range for large classes |
 | Template build fails with "did not report ONTRAK-SETUP-OK" | the setup script threw | The error includes the output tail; run the VM manually and execute `setup.ps1` to see the full error |

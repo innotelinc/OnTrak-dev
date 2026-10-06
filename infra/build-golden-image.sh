@@ -37,6 +37,11 @@
 #   ONTRAK_GOLDEN_ALLOW_NESTED  run the build even when this host looks like nested
 #                           AMD KVM, which cannot virtualise SMM (the preflight
 #                           refuses by default).
+#   ONTRAK_PACK_VM          name for incus-windows' own build VM
+#                           (default ontrak-winpack-build). It is pinned so a failed
+#                           build leaves something the operator can name.
+#   ONTRAK_DISCARD_BUILD_VM  delete a leftover build VM at the start instead of
+#                           stopping. A failed build keeps its VM on purpose.
 
 set -euo pipefail
 
@@ -49,6 +54,11 @@ IMAGE_ALIAS="${ONTRAK_IMAGE_ALIAS:-ontrak-win-base}"
 PROJECT="${ONTRAK_INCUS_PROJECT:-ontrak}"
 NETWORK="${ONTRAK_NETWORK:-ontrak0}"
 BUILD_VM="${ONTRAK_BUILD_VM:-ontrak-golden-build}"
+# incus-windows' *own* build VM (tools/pack.sh), which is not the same thing as
+# $BUILD_VM above: that one is this script's, cloned later from the published image
+# to apply post-install.ps1. This one is created and named inside the third-party
+# checkout, so this script pins its name there and keeps it when a build fails.
+PACK_VM="${ONTRAK_PACK_VM:-ontrak-winpack-build}"
 PY="${PROJECT_ROOT}/.venv/bin/python"
 
 log()  { printf '\033[36m==>\033[0m %s\n' "$*"; }
@@ -185,6 +195,35 @@ else
   warn "could not size the build disk: tools/pack.sh no longer matches — expect a 60 GiB image, a long publish, and possibly a wedged Incus database"
 fi
 
+# --------------------------------------------- what keeps the installed disk --
+# tools/pack.sh names its build VM with six random bytes and deletes it from an EXIT
+# trap:
+#
+#     name=build$(head -c6 /dev/urandom | ...)
+#     cleanup() { incus image rm "${name}" || :; incus delete -f "${name}"; }
+#     trap cleanup EXIT INT QUIT TERM
+#
+# Both halves are a problem for a build this long. The random name means that after
+# a failure there is no name to hand to the operator; the unconditional trap means
+# *any* exit deletes the disk, including exits that have nothing to do with Windows.
+# That was measured the expensive way. A build that had applied Windows to disk and
+# booted it through three setup passes was destroyed after roughly three hours
+# because an unrelated `apt` upgrade on the same host restarted incus; click.py's
+# next poll of `incus ls` then failed, and pack.sh's trap deleted the instance on the
+# way out. Nothing had gone wrong with Windows.
+#
+# So the name is pinned and the delete is removed here. The VM is therefore left in
+# place whenever the build fails, where its disk can be published by hand, and this
+# script removes it itself once the image has really been imported.
+if sed -i -E "s|^name=build.*|name=${PACK_VM}|" "$CHECKOUT/tools/pack.sh" \
+   && sed -i -E '/^[[:space:]]*incus delete -f /d' "$CHECKOUT/tools/pack.sh" \
+   && grep -q "^name=${PACK_VM}$" "$CHECKOUT/tools/pack.sh" \
+   && ! grep -qE '^[[:space:]]*incus delete -f ' "$CHECKOUT/tools/pack.sh"; then
+  log "build VM pinned to ${PACK_VM}, and kept until the image is imported (ONTRAK_PACK_VM)"
+else
+  warn "could not pin the build VM in tools/pack.sh: it no longer matches — a failed build will delete the installed disk after all, and any leftover VM will have a random name"
+fi
+
 # --------------------------------------- no-Secure-Boot golden images -------- #
 # Windows 11 Setup refuses to install unless Secure Boot (and a TPM) are present.
 # ONTRAK_GOLDEN_NO_SECUREBOOT=1 lifts that: the build VM gets no TPM and no Secure
@@ -269,6 +308,21 @@ PYEOF
   fi
 fi
 
+# ------------------------------------------------------- the last build VM ----
+# A build VM from an earlier failed run can hold a fully installed Windows disk.
+# Do not quietly throw that away -- say so, and make the operator choose.
+# pack.sh publishes under the same name it gives the VM, so a leftover image alias
+# of that name breaks a re-run just as a leftover VM does.
+if incus info "$PACK_VM" >/dev/null 2>&1 || incus image info "$PACK_VM" >/dev/null 2>&1; then
+  if [[ "${ONTRAK_DISCARD_BUILD_VM:-}" == "1" ]]; then
+    warn "discarding the leftover build VM and image $PACK_VM (ONTRAK_DISCARD_BUILD_VM=1)"
+    incus delete "$PACK_VM" --force 2>/dev/null || :
+    incus image rm "$PACK_VM" 2>/dev/null || :
+  else
+    die "there is already a build VM or image named $PACK_VM. A failed build keeps its VM on purpose, because it may hold an installed Windows disk -- see docs/operations.md, 'Recovering a build VM that was kept'. Remove it (incus delete $PACK_VM --force; incus image rm $PACK_VM) or re-run with ONTRAK_DISCARD_BUILD_VM=1 to discard it."
+  fi
+fi
+
 # ------------------------------------------------------------------- build ----
 log "building the Windows ${TARGET} image (this takes 30-60 minutes)"
 pushd "$CHECKOUT" >/dev/null
@@ -296,10 +350,18 @@ IMPORT_ALIAS="win${TARGET}"
 OUTDIR="./output/${IMPORT_ALIAS}"
 [[ -f "$OUTDIR/incus.tar.xz" ]] || OUTDIR="./output/${TARGET}"
 [[ -f "$OUTDIR/incus.tar.xz" && -f "$OUTDIR/disk.qcow2" ]] \
-  || die "the build produced no image: expected incus.tar.xz and disk.qcow2 under ./output/${IMPORT_ALIAS} (a stale directory there makes build.sh bail out early -- remove it and retry)"
+  || die "the build produced no image: expected incus.tar.xz and disk.qcow2 under ./output/${IMPORT_ALIAS} (a stale directory there makes build.sh bail out early -- remove it and retry). The build VM ${PACK_VM} has been kept -- see docs/operations.md, 'Recovering a build VM that was kept'."
 log "importing the built image into Incus (project $PROJECT)"
 incus --project "$PROJECT" image import "$OUTDIR/incus.tar.xz" "$OUTDIR/disk.qcow2" \
   requirements.cdrom_agent=true --alias "$IMPORT_ALIAS"
+
+# The image is safely imported, so the build VM has done its job. It was kept until
+# exactly this point on purpose: pack.sh used to delete it on any failure, which is
+# how an installed Windows disk gets thrown away for no reason.
+if incus info "$PACK_VM" >/dev/null 2>&1; then
+  log "removing the build VM $PACK_VM now that its image has been imported"
+  incus delete "$PACK_VM" --force
+fi
 popd >/dev/null
 
 # The imported image keeps whatever alias incus-windows chose; find the newest one
