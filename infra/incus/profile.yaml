@@ -14,6 +14,13 @@ config:
   limits.memory: 4GiB
   # Windows is chatty on the bus; this also keeps a misbehaving student VM from
   # starving the host's storage.
+  #
+  # A host whose cgroup v2 has no `io` controller cannot set this at all, and says
+  # so badly: every container fails to start with `Failed to set "io.weight" to
+  # "500"` and Incus reports only `incusd forklxc ...: exit status 1`. WSL2 is the
+  # usual such host. Drop the setting there and keep it everywhere else:
+  #
+  #   incus --project ontrak profile unset ontrak-student limits.disk.priority
   limits.disk.priority: "5"
   # training VMs are standalone (no domain) and disposable
   boot.autostart: "false"
