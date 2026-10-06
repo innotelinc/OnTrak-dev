@@ -239,6 +239,22 @@ if [[ -x "$PROJECT_ROOT/infra/host-local-hairpin.sh" ]]; then
     || warn "could not install the local-hairpin rule — published ports stay reachable only from other machines"
 fi
 
+# The other half of sharing a host with Docker. The stack runs the portal in
+# containers, and Docker sets the host's FORWARD policy to DROP, accepting only the
+# traffic it knows about — so a packet from a guest on the lab bridge is dropped as
+# unrelated forwarded traffic on its way out of the uplink. The guest then resolves
+# names (DNS is UDP, answered by the host) and opens no connection at all, which
+# reads as a broken guest rather than a firewall: the first symptom is a template
+# build failing inside a guest that reports itself healthy, on the one scenario that
+# has to install a package.
+#
+# Non-fatal, like the hairpin rule above, and for the same reason.
+if [[ -x "$PROJECT_ROOT/infra/host-lab-forward.sh" ]]; then
+  log "letting the lab's guests reach the network"
+  "$PROJECT_ROOT/infra/host-lab-forward.sh" --install \
+    || warn "could not accept the lab bridge in the forward path — guests will resolve names and reach nothing"
+fi
+
 # ------------------------------------------------------------------ summary ---
 DRIVER="$(storage_driver)"
 BRIDGE_IP="$(incus network get "$NETWORK" ipv4.address)"
