@@ -18,7 +18,7 @@ REMOTE_OVERLAY := -f docker-compose.yml -f docker-compose.remote.yml
 
 .PHONY: help setup secrets check doctor validate test lint demo \
         catalog catalog-validate media-status media-fetch generate schedule \
-        golden templates pool reap demo-serve host-image landing \
+        golden golden-import templates pool reap demo-serve host-image landing \
         installer-iso installer-iso-smoke installer-iso-test \
         build up up-remote down logs ps exec check-compose setup-log \
         docker-demo docker-shell provision provision-plan console-recreate \
@@ -195,6 +195,14 @@ golden: ## Build the golden Windows image (30-60 min; downloads Windows eval med
 	@guest="$$(sed -n 's/^ONTRAK_GUEST__PASSWORD=//p' .env | head -1)"; \
 	test -n "$$guest" || { echo "ONTRAK_GUEST__PASSWORD is empty in .env — run 'make secrets'"; exit 2; }; \
 	ONTRAK_GUEST__PASSWORD="$$guest" bash infra/build-golden-image.sh
+
+golden-import: ## Publish a golden image built on another host (make golden-import ARGS=/path/to/export)
+	@# Not every host can build it: one whose KVM is nested on an AMD CPU cannot
+	@# virtualise SMM, so Windows Setup dies before it starts. Build where that
+	@# works and bring the export here — see docs/operations.md, "Building the
+	@# golden image on a nested host". The disk is checked before it is published,
+	@# because a half-applied image imports fine and then hangs every template.
+	bash infra/import-golden-image.sh $(ARGS)
 
 ## ---- Range operations ---------------------------------------------------
 

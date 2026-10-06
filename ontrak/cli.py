@@ -237,6 +237,16 @@ def cmd_doctor(args) -> int:
     if IncusClient.available():
         if client.image_exists(settings.incus.image_alias):
             _say(OK, f"golden image {settings.incus.image_alias!r} present")
+        elif ctx.incus and ctx.manager is not None and not ctx.manager.golden_image_required():
+            # Every scenario on this range names a catalog workload, so nothing is
+            # cloned from the site's Windows image. Calling that image "missing" would
+            # report a healthy Linux-only range as broken, and send an operator to a
+            # build their host may not even be able to run.
+            _say(
+                INFO,
+                f"golden image {settings.incus.image_alias!r} not built, and no scenario is "
+                "built on it — this range runs on catalog workloads only",
+            )
         else:
             _say(FAIL, f"golden image {settings.incus.image_alias!r} missing — run infra/build-golden-image.sh")
             failures += 1

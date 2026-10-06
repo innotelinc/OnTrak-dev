@@ -248,6 +248,7 @@ for the whole class: a cluster does not make a cold Windows boot faster.
 | Task | Command / approach |
 | --- | --- |
 | Refresh the Windows image (patches, expired eval) | `make golden` — rebuilds and republishes `ontrak-win-base`, then rebuild templates |
+| Publish a golden image built on another host | `make golden-import ARGS=/path/to/export` — checks the disk is a finished install, then imports it as `ontrak-win-base`. See [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host) |
 | Scenario edited | `make validate && .venv/bin/ontrak template build <id> --force` |
 | Templates regenerated | Pool VMs built from the old template keep running; end their sessions or let the reaper recycle them |
 | Leaked instances | `incus --project ontrak list` and delete anything that is not `tpl-*` or an active session; `ontrak stats` shows the state counts |
@@ -282,13 +283,34 @@ virtualisation is **not** nested and move the result:
 1. On a suitable host — bare-metal Linux, a Linux desktop, or a cloud VM with
    nested virtualisation — run `make golden`, then `make templates` there and let
    the range point at that host; or
-2. run `make golden` there and import the image onto the range host
-   (`incus --project ontrak image import ...`, alias `ontrak-win-base`; the
-   script's header and closing notes show the exact paths).
+2. run `make golden` there, copy the export the build wrote
+   (`build/incus-windows/output/win11e` — `incus.tar.xz` and `disk.qcow2`) to the
+   range host, and publish it there:
 
-On a host without the image, `ontrak doctor` keeps reporting
-`golden image 'ontrak-win-base' missing`, and Windows sessions cannot start. That
-is accurate, not a bug.
+   ```bash
+   make golden-import ARGS=/path/to/win11e
+   ```
+
+   `infra/import-golden-image.sh` checks the disk is a *finished* install before it
+   publishes anything — `scripts/verify-golden-image.py` reads the partition table
+   and the EFI System Partition straight out of the file and looks for
+   `\EFI\Microsoft\Boot\bootmgfw.efi`, so it needs no root and no loop device — then
+   imports it as `ontrak-win-base` in the `ontrak` project. Run `make templates`
+   after it.
+
+### Running with no Windows image at all
+
+The golden image is only needed by scenarios that name no catalog workload: those
+clone `incus.image_alias`. Every scenario that *does* name a workload
+(`ubuntu-24.04`, `debian-12`, …) is built from that workload's own image instead,
+by `ontrak image build <entry>`. A range whose scenarios are all of the second
+kind is complete without any Windows image.
+
+On such a range `ontrak doctor` reports the golden image as
+`info … no scenario is built on it` rather than as a failure, because nothing on
+the range clones it — there is nothing missing. Where the image *is* needed it
+still reports `golden image 'ontrak-win-base' missing` and fails, and Windows
+sessions cannot start. Both are accurate, and neither is a bug.
 
 ## Troubleshooting
 

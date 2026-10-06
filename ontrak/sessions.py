@@ -308,6 +308,18 @@ class SessionManager:
                 pairs.append((scenario, workload_id))
         return pairs
 
+    def golden_image_required(self) -> bool:
+        """Whether anything on this range is built on the site's golden image.
+
+        A scenario that names a catalog workload is built from that workload's own
+        image (``ontrak-ubuntu-24.04``, …); one that names none falls back to
+        ``incus.image_alias``, the Windows golden image. A range whose scenarios all
+        name a workload — a Linux-only range — runs perfectly well without it, and
+        reporting that image as *missing* there reads as a broken range when nothing
+        is broken. So the check is asked before the image is called absent.
+        """
+        return any(not workload for _, workload in self.workload_pairs())
+
     def template_status(self) -> list[dict]:
         incus = self.incus
         rows = []
