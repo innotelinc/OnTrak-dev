@@ -92,10 +92,40 @@ if incus --project "$PROJECT" image info "$ALIAS" >/dev/null 2>&1; then
 fi
 
 log "importing into Incus (project $PROJECT, alias $ALIAS)"
-# requirements.cdrom_agent=true is what `incus-windows` sets and what the templates
-# expect; without it `incus init` refuses the image for a VM with an agent config
-# CD-ROM attached.
-incus --project "$PROJECT" image import "$META" "$DISK" requirements.cdrom_agent=true --alias "$ALIAS"
+incus --project "$PROJECT" image import "$META" "$DISK" --alias "$ALIAS"
+
+# Adopt the image: clear the one property upstream stamps on everything it builds,
+# and which nothing in this range can satisfy.
+#
+# incus-windows' tools/pack.sh publishes its build VM with
+# `requirements.cdrom_agent=true`, `incus publish` copies image properties, and the
+# property travels in the export's metadata.yaml as well. So every image built this
+# way carries it, and importing *without* the flag — which a reader would reasonably
+# expect to drop it — does not: the metadata declares it, so it is still there
+# afterwards. It has to be cleared explicitly.
+#
+# What it means is "every instance made from this image must have an `agent:config`
+# disk" (the config CD-ROM the Incus agent reads), and Incus enforces it at *start*,
+# not at create. Nothing in `ontrak/` attaches one — OnTrak drives Windows over
+# WinRM (`guest.driver`), which needs no agent config — so the failure lands late and
+# reads strangely:
+#
+#     Error: This virtual machine image requires an agent:config disk be added
+#
+# which is what the first `ontrak template build` on a freshly imported image
+# returned; every Windows template would have hit it. OnTrak's *own* golden build
+# hits it too, in the build VM it clones to apply post-install.ps1 — see the same
+# edit in infra/build-golden-image.sh.
+#
+# An operator who wants the opt-in `incus-exec` driver puts the requirement back and
+# attaches the disk, which is all upstream was asking for:
+#
+#     incus --project <project> config device add <vm> incusagent disk source=agent:config
+#     incus --project <project> image set-property ontrak-win-base requirements.cdrom_agent=true
+#
+# `incus image unset-property` is not the tool here: it panics with a nil pointer
+# dereference in Incus 7.5.1. An empty value is how the property is removed.
+incus --project "$PROJECT" image set-property "$ALIAS" requirements.cdrom_agent=""
 
 incus --project "$PROJECT" image list "$ALIAS" --format csv -c l,d,s >/dev/null 2>&1 || true
 

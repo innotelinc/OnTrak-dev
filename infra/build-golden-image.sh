@@ -334,8 +334,7 @@ sh build.sh "$TARGET"
 #   * tools/import.sh runs a bare `incus image import`, which means the default
 #     project. The templates this image exists for live in $PROJECT, and an image
 #     alias is project-scoped, so "incus --project $PROJECT init <alias>" could not
-#     see it. Import into the project the templates are built in, using the same
-#     requirements flag upstream uses.
+#     see it. Import into the project the templates are built in.
 IMPORT_ALIAS="win${TARGET}"
 OUTDIR="./output/${IMPORT_ALIAS}"
 [[ -f "$OUTDIR/incus.tar.xz" ]] || OUTDIR="./output/${TARGET}"
@@ -343,7 +342,29 @@ OUTDIR="./output/${IMPORT_ALIAS}"
   || die "the build produced no image: expected incus.tar.xz and disk.qcow2 under ./output/${IMPORT_ALIAS} (a stale directory there makes build.sh bail out early -- remove it and retry). The build VM ${PACK_VM} has been kept -- see docs/operations.md, 'Recovering a build VM that was kept'."
 log "importing the built image into Incus (project $PROJECT)"
 incus --project "$PROJECT" image import "$OUTDIR/incus.tar.xz" "$OUTDIR/disk.qcow2" \
-  requirements.cdrom_agent=true --alias "$IMPORT_ALIAS"
+  --alias "$IMPORT_ALIAS"
+
+# Adopt it: clear the one property upstream stamps on every image it builds, and
+# which nothing in this range can satisfy.
+#
+# tools/pack.sh publishes its build VM with `requirements.cdrom_agent=true`,
+# `incus publish` copies image properties, and the property also travels in the
+# export's metadata.yaml — so it is on the image import just brought in, and
+# importing *without* the flag does not remove it (the metadata declares it, so the
+# flag was never what put it there).
+#
+# It means "every instance made from this image must have an `agent:config` disk",
+# and Incus enforces it at *start* rather than at create. The very next step here
+# creates a VM from this image to apply post-install.ps1 — so without this the
+# golden build dies, after the whole two-hour install, with
+#
+#     Error: This virtual machine image requires an agent:config disk be added
+#
+# It is also what stopped every Windows template build; infra/import-golden-image.sh
+# carries the fuller account, including why the opt-in `incus-exec` driver wants the
+# requirement back, and why `incus image unset-property` (which panics in Incus 7.5.1)
+# is not the tool for this.
+incus --project "$PROJECT" image set-property "$IMPORT_ALIAS" requirements.cdrom_agent=""
 
 # The image is safely imported, so the build VM has done its job. It was kept until
 # exactly this point on purpose: pack.sh used to delete it on any failure, which is

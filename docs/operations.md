@@ -249,6 +249,7 @@ for the whole class: a cluster does not make a cold Windows boot faster.
 | --- | --- |
 | Refresh the Windows image (patches, expired eval) | `make golden` — rebuilds and republishes `ontrak-win-base`, then rebuild templates |
 | Publish a golden image built on another host | `make golden-import ARGS=/path/to/export` — checks the disk is a finished install, then imports it as `ontrak-win-base`. See [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host) |
+| Move the golden image between hosts, more than once | `infra/publish-golden-image.sh` puts the verified image in a registry and each host pulls it, instead of copying a 12 GB export by hand. See [Publishing the golden image to a registry](#publishing-the-golden-image-to-a-registry) |
 | A build failed and left its VM behind | `incus list ontrak-winpack-build` — a failed build keeps its VM on purpose, because the disk may hold a finished install. See [Recovering a build VM that was kept](#recovering-a-build-vm-that-was-kept) |
 | Scenario edited | `make validate && .venv/bin/ontrak template build <id> --force` |
 | Templates regenerated | Pool VMs built from the old template keep running; end their sessions or let the reaper recycle them |
@@ -298,6 +299,49 @@ virtualisation is **not** nested and move the result:
    `\EFI\Microsoft\Boot\bootmgfw.efi`, so it needs no root and no loop device — then
    imports it as `ontrak-win-base` in the `ontrak` project. Run `make templates`
    after it.
+
+   A 12 GB export is a poor thing to move by hand more than once, which is what
+   [Publishing the golden image to a registry](#publishing-the-golden-image-to-a-registry)
+   is for.
+
+### Publishing the golden image to a registry
+
+Copying the export between hosts works once. For a classroom of hosts, or for one
+that cannot build the image at all, publish it to a registry and pull it where it is
+needed:
+
+```bash
+infra/publish-golden-image.sh build/incus-windows/output/win11e
+```
+
+The script verifies the disk first, for the reason the import does: a half-applied
+image stores and transfers perfectly well, and then hangs every template built from
+it — publishing one hands that to every host at once. It then pushes the two files
+the build wrote (`incus.tar.xz` and `disk.qcow2`) as a single OCI artifact, using
+`oras`, which it needs on `PATH` or pointed at with `ONTRAK_ORAS`.
+
+A pulling host needs one step more than an importing one:
+
+```bash
+oras login ghcr.io -u <user>                    # a new package is private by default
+oras pull ghcr.io/innotelinc/ontrak-golden:win11e-2026-10-06 -o ./golden-export
+make golden-import ARGS=./golden-export         # verifies the disk again, then imports
+make templates                                  # templates are built where they run
+```
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `ONTRAK_GOLDEN_REPOSITORY` | `ghcr.io/innotelinc/ontrak-golden` | any OCI registry `oras` can reach |
+| `ONTRAK_GOLDEN_TAG` | `win11e-<today>` | one tag per build, so an older image stays pullable |
+| `ONTRAK_GOLDEN_TOKEN` / `ONTRAK_GOLDEN_USER` | `gh auth token` / `gh api user` | leave both unset to use an existing `oras login` |
+| `ONTRAK_ORAS` | `oras` on `PATH` | oras is not vendored with this repo |
+| `ONTRAK_SKIP_VERIFY` | unset | publishes an unverified disk; only for a deliberate call |
+
+Two things about what lands in the registry. A GHCR package starts **private**, which
+is the right default for an image built from a Windows evaluation ISO — making it
+public is a deliberate act in the package's settings. And a published image is not a
+substitute for `make templates`: a template is a booted, faulted snapshot, so it has
+to be built on the host that will run it.
 
 ### Running with no Windows image at all
 
@@ -408,6 +452,8 @@ rather than published.
 | `make golden` gets all the way through the install and then fails part-way through publishing, and from that point every `incus` command fails with `Failed to begin transaction: no available cowsql leader server found` or `context deadline exceeded` | `incus publish` tars the build disk's *apparent* size into the image — holes are not skipped — and the image store shares a dataset with Incus's own cowsql database, so a long enough copy starves the database's leader election and takes the daemon's DB with it. The bigger the build disk, the worse it gets: a 60 GiB disk copied with `--compression none` ran for fourteen minutes before wedging the DB, and a 29 GiB one ran fifteen | Size the build disk small — that is the lever this script has, and it is already set (`ONTRAK_GOLDEN_DISK`, default 32 GiB). Note that the pinned builder publishes with `--compression none` on purpose: its export step extracts the disk from a plain `.tar`, and `incus image export` writes `<fingerprint>.tar.gz` when the image is gzipped, which that step cannot read. If the DB is already wedged, `systemctl restart incus` clears it — the installed disk survives, so recover rather than rebuild: publish that instance instead of re-running the 30-60 minute install |
 | `make golden` stops immediately with `this host looks like nested AMD KVM ... cannot virtualise SMM` | the host is itself a guest on an AMD CPU (e.g. WSL2/Hyper-V on a Ryzen), and nested AMD SVM cannot virtualise SMM — Windows 11 Setup needs it | Build on a host where KVM is **not** nested and copy the image in; see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host). `ONTRAK_GOLDEN_ALLOW_NESTED=1` skips the check, but the build then dies with `KVM: entry failed, hardware error 0xffffffff` |
 | `make golden` fails seconds in, and the build VM's qemu log ends `KVM: entry failed, hardware error 0xffffffff` with `SMM=1` | the host cannot virtualise SMM and Windows 11 Setup needs it. Disabling Secure Boot and the TPM does not help (OVMF uses SMM for its runtime services regardless), and `-machine smm=off` hangs the guest instead | Move the build to a host where KVM is not nested — see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host) |
+| A Windows instance goes to `ERROR` a few seconds after it starts — `ontrak template build` on the golden image, or a student session — and its qemu log ends `KVM: entry failed, hardware error 0xffffffff` with `SMM=1` | the same host limit as the row above, except that it stops *running* the image and not only building it, so it is worth recognising here. Every Windows VM this range hands out therefore fails on such a host, and the instance reports `RUNNING` for the ten seconds before it doesn't | Set `security.secureboot=false` if you like, but it will not help — OVMF needs SMM for its runtime services either way — and confirm the host with `systemd-detect-virt` plus `grep vendor_id /proc/cpuinfo`. Windows has to run where KVM is not nested: bare metal, or a host with nested virtualisation. Scenarios that name a workload are unaffected, because those guests are containers |
+| `ontrak template build` (or `session start`) fails with `Error: This virtual machine image requires an agent:config disk be added` | the golden image carries `requirements.cdrom_agent=true`. incus-windows' `tools/pack.sh` stamps it on every image it publishes, `incus publish` copies image properties, and the property also travels in the export's `metadata.yaml` — so it arrives with the image and cannot be dropped by importing without the flag. It means "every instance from this image must have an `agent:config` disk", and Incus enforces it at *start*, where nothing in `ontrak/` attaches one: OnTrak drives Windows over WinRM, which needs no agent config | Fixed — `infra/import-golden-image.sh` and `infra/build-golden-image.sh` clear the property as they adopt the image. To repair one that is already imported: `incus --project ontrak image set-property ontrak-win-base requirements.cdrom_agent=""` (`incus image unset-property` panics with a nil pointer in Incus 7.5.1). Operators using the opt-in `incus-exec` driver want the requirement back, with the disk: `incus config device add <vm> incusagent disk source=agent:config` |
 | `ontrak template build` fails with `incus list --format=json failed (124): timed out after 120s`, even though `ONTRAK_INCUS__OPERATION_TIMEOUT_SECONDS` is raised | the plumbing used to fall back to its own 120 s default for reads, ignoring the operator's setting. `incus list` is not a cheap read on a busy host: it reports each instance's state, agent status and address, so it blocks for minutes on a VM that is still booting | Fixed — the configured timeout is the ceiling for every call. If you are on an older build, raise the default in `incus.py` or pacify the host first |
 | `make golden` fails after a long install with `Error: Failed to begin transaction: sql: database is closed`, then `incus ls` fails with `Error: Image not found`, and the build VM is gone | something on the host restarted `incus` while the build was running, and `tools/pack.sh` deleted its build VM from an EXIT trap on the way out. An unattended `apt` upgrade is enough: `unattended-upgrades` and `apt-daily*.timer` are enabled by default, `ovmf`/`qemu-efi-*` upgrades are routine, and the restart kills a running build | Current builds keep the VM (`ontrak-winpack-build`) so the installed disk survives, and a new run stops rather than overwrite it — recover with [Recovering a build VM that was kept](#recovering-a-build-vm-that-was-kept) instead of rebuilding. The script does not *disable* the host's update timers, but it does name the ones it finds at the start of a build and tell you to stop them; they return at the next boot, which is deliberate — a build should not leave a range's security updates off |
 | `make golden` gets all the way through the install and the export, then fails with `tar: rootfs.img: Wrote only 512 of 10240 bytes`, and the published image has vanished from `incus image list` | `tools/pack.sh` extracts the disk back out of the export tarball when it is finished, and the build host's **root** filesystem ran out of space doing it — not the Incus pool, which is usually a separate disk. `pack.sh`'s `EXIT` trap then removes the image it had just published, so what is left is a complete export tarball and a truncated `rootfs.img` | Recover, do not rebuild — the tarball *is* the image, and the install is finished. See [Recovering a build VM that was kept](#recovering-a-build-vm-that-was-kept) |
