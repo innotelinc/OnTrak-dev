@@ -14,6 +14,10 @@ state/
 *.sqlite3
 config/local.yaml
 .env
+# the local Authentik (deploy/authentik): its generated secrets, and the values
+# that point a local range at it. Both hold credentials.
+deploy/authentik/.env
+deploy/authentik/ontrak-local.env
 
 # editor and agent scratch space
 .freebuff/

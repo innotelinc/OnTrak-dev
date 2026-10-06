@@ -26,6 +26,17 @@
 #   ONTRAK_GOLDEN_MEMORY    RAM for the build VM (default 6GB)
 #   ONTRAK_GOLDEN_DISK      disk for the build VM, and so the published image
 #                           (default 32GiB)
+#   ONTRAK_GOLDEN_NO_SECUREBOOT  build with Secure Boot (and TPM) OFF and satisfy
+#                           the Windows 11 Setup gate with the standard LabConfig
+#                           bypasses. For a lab that wants a no-Secure-Boot image
+#                           (range VMs clone with secureboot=false anyway) or a host
+#                           that cannot offer a TPM. This does NOT help a host that
+#                           cannot virtualise SMM -- the preflight below refuses
+#                           that host by name -- and the image is not a production
+#                           one.
+#   ONTRAK_GOLDEN_ALLOW_NESTED  run the build even when this host looks like nested
+#                           AMD KVM, which cannot virtualise SMM (the preflight
+#                           refuses by default).
 
 set -euo pipefail
 
@@ -44,11 +55,40 @@ log()  { printf '\033[36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[!]\033[0m %s\n' "$*"; }
 die()  { printf '\033[31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
-[[ -n "${ONTRAK_GUEST_PASSWORD:-}" ]] || die "set ONTRAK_GUEST__PASSWORD (the training account password) first"
+# The name is ONTRAK_GUEST__PASSWORD — `ONTRAK_<SECTION>__<KEY>`, the same one the
+# config, the portal and scripts/secrets.sh use. A single underscore here asked
+# for a variable nothing else sets, so an operator who did exactly what the error
+# message said got the same error again on the next run.
+[[ -n "${ONTRAK_GUEST__PASSWORD:-}" ]] \
+  || die "set ONTRAK_GUEST__PASSWORD (the training account password) first — 'make golden' exports it from .env"
 command -v incus >/dev/null || die "incus not found; run infra/bootstrap-host.sh first"
 command -v xorriso >/dev/null || die "xorriso is required to repack the Windows ISO"
 command -v genisoimage >/dev/null || die "genisoimage is required by incus for the agent config ISO"
-[[ -x "$PY" ]] || die "python venv missing; run 'make venv' first"
+[[ -x "$PY" ]] || die "python venv missing; run 'make setup' first"
+
+# ------------------------------------------------------------ host preflight --
+# Windows 11 Setup needs Secure Boot, and in OVMF Secure Boot means SMM. A host
+# whose own virtualisation is *nested* may be unable to virtualise SMM at all. It
+# was measured on nested AMD SVM (WSL2/Hyper-V on a Ryzen): the build VM enters
+# ERROR seconds after launch and its qemu log ends with
+#
+#     KVM: entry failed, hardware error 0xffffffff
+#     ... EIP=00008000 ... SMM=1 HLT=0
+#
+# Turning Secure Boot and the TPM off does not help -- OVMF uses SMM for its
+# runtime services regardless -- and `-machine smm=off` does not fix it either: it
+# trades the crash for a guest that spins at 100% CPU and never writes a sector. A
+# legacy-BIOS build (CSM/SeaBIOS, no SMM at all) hangs the same way.
+#
+# None of that is fixable from here, and the build costs a 5 GiB ISO download and
+# 30-60 minutes before it fails. So refuse up front, with the reason, unless the
+# operator says the host is not what it looks like.
+if [[ "${ONTRAK_GOLDEN_ALLOW_NESTED:-}" != "1" ]] \
+   && command -v systemd-detect-virt >/dev/null \
+   && [[ "$(systemd-detect-virt 2>/dev/null)" != "none" ]] \
+   && grep -q 'vendor_id.*AuthenticAMD' /proc/cpuinfo; then
+  die "this host looks like nested AMD KVM ($(systemd-detect-virt)), which cannot virtualise SMM: the build VM dies at 'KVM: entry failed, hardware error 0xffffffff' (SMM=1) as soon as Windows Setup boots, and 'smm=off' only hangs it. Build the image where KVM is not nested -- bare-metal Linux, or a cloud VM with nested virtualisation -- then copy it in (see docs/operations.md, 'Building the golden image on a nested host'). Set ONTRAK_GOLDEN_ALLOW_NESTED=1 to try anyway."
+fi
 
 if [[ "$REF" == "main" ]]; then
   warn "ONTRAK_INCUS_WINDOWS_REF is 'main'. Pin a tag or commit for reproducible builds:"
@@ -101,8 +141,12 @@ fi
 # Bypassing the host write cache for the build disk removes the memory pressure
 # that caused the kill, which is the fix that actually matters. (ONTRAK_GOLDEN_CPUS
 # / ONTRAK_GOLDEN_MEMORY above bound the guest's own RAM for the same reason.)
-if sed -i '/^incus config device set "${name}" root io.bus=virtio-blk$/a incus config device set "${name}" root io.cache=none' "$CHECKOUT/tools/pack.sh" \
-   && grep -q 'root io.cache=none' "$CHECKOUT/tools/pack.sh"; then
+# Insert only if absent. The line was appended on every run at first, so a second
+# run (after a failed build) added `io.cache=none` again -- once per run.
+if ! grep -q 'root io.cache=none' "$CHECKOUT/tools/pack.sh"; then
+  sed -i '/^incus config device set "${name}" root io.bus=virtio-blk$/a incus config device set "${name}" root io.cache=none' "$CHECKOUT/tools/pack.sh"
+fi
+if grep -q 'root io.cache=none' "$CHECKOUT/tools/pack.sh"; then
   log "build disk set to io.cache=none (keeps the Windows image apply out of the host page cache)"
 else
   warn "could not set io.cache=none on the build disk: tools/pack.sh no longer matches — on a 16 GiB range host, expect the OOM kill described above"
@@ -130,6 +174,90 @@ if sed -i -E "/^\s*incus config device set .*root size=[0-9]+GiB/s/root size=[0-
   log "build disk sized at ${BUILD_DISK} (ONTRAK_GOLDEN_DISK) — this is also the published image's disk"
 else
   warn "could not size the build disk: tools/pack.sh no longer matches — expect a 60 GiB image, a long publish, and possibly a wedged Incus database"
+fi
+
+# --------------------------------------- no-Secure-Boot golden images -------- #
+# Windows 11 Setup refuses to install unless Secure Boot (and a TPM) are present.
+# ONTRAK_GOLDEN_NO_SECUREBOOT=1 lifts that: the build VM gets no TPM and no Secure
+# Boot, and the Setup gate is satisfied with the standard LabConfig bypasses, so the
+# image installs on a host that cannot offer a TPM. Range VMs clone with
+# secureboot=false anyway, so they are unaffected -- it is opt-in because the image
+# is installed past the gate Windows 11 normally insists on.
+#
+# Note this does NOT rescue a host that cannot virtualise SMM: with Secure Boot off,
+# OVMF still uses SMM for its runtime services, so the nested-AMD host the preflight
+# above refuses still fails. That is checked before the build, not here.
+if [[ "${ONTRAK_GOLDEN_NO_SECUREBOOT:-}" =~ ^(1|true|yes|on)$ ]]; then
+  warn "ONTRAK_GOLDEN_NO_SECUREBOOT set: building with Secure Boot and TPM OFF."
+  warn "  The image installs past the Windows 11 TPM/Secure Boot gate, so it is not"
+  warn "  a production golden image."
+
+  # 1. Keep pack.sh from giving the build VM a TPM and Secure Boot. Off means off:
+  #    no TPM device, security.secureboot=false.
+  sed -i -E 's|^([[:space:]]*)incus config device add .* tpm tpm[[:space:]]*$|\1# ONTRAK_NO_SECUREBOOT: no TPM on the build VM|' "$CHECKOUT/tools/pack.sh"
+  sed -i -E 's|^([[:space:]]*)incus config set .* security\.secureboot=true[[:space:]]*$|\1# ONTRAK_NO_SECUREBOOT: no Secure Boot on the build VM|' "$CHECKOUT/tools/pack.sh"
+  if grep -qE '^[[:space:]]*incus config (device add .* tpm tpm|set .* security\.secureboot=true)' "$CHECKOUT/tools/pack.sh"; then
+    warn "could not disable TPM/Secure Boot in tools/pack.sh: it no longer matches — the build will still need SMM"
+  else
+    log "build VM set to run without TPM and without Secure Boot"
+  fi
+
+  # 2. Let Windows Setup install past the checks it can no longer satisfy.
+  UNATTEND="$CHECKOUT/unattend/${TARGET}/Autounattend.xml"
+  if [[ -f "$UNATTEND" ]] && ! grep -q 'ONTRAK_NO_SECUREBOOT_BEGIN' "$UNATTEND"; then
+    "$PY" - "$UNATTEND" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as fh:
+    s = fh.read()
+
+# The end of the Microsoft-Windows-Setup component in the windowsPE pass -- the
+# only place a RunSynchronous runs early enough to beat the TPM/Secure Boot check.
+anchor = (
+    "        <Organization>Vagrant</Organization>\n"
+    "      </UserData>\n"
+    "    </component>"
+)
+if anchor not in s:
+    sys.exit("autounattend does not match: the Microsoft-Windows-Setup component moved")
+
+checks = [
+    ("TPM", "BypassTPMCheck"),
+    ("Secure Boot", "BypassSecureBootCheck"),
+    ("RAM", "BypassRAMCheck"),
+    ("CPU", "BypassCPUCheck"),
+    ("storage", "BypassStorageCheck"),
+]
+lines = [
+    "        <Organization>Vagrant</Organization>",
+    "      </UserData>",
+    "      <!-- ONTRAK_NO_SECUREBOOT_BEGIN -->",
+    "      <RunSynchronous>",
+]
+for order, (label, key) in enumerate(checks, start=1):
+    lines += [
+        '        <RunSynchronousCommand wcm:action="add">',
+        f"          <Order>{order}</Order>",
+        f"          <Description>Bypass {label} check</Description>",
+        f'          <Path>reg add HKLM\\SYSTEM\\Setup\\LabConfig /v {key} /t REG_DWORD /d 1 /f</Path>',
+        "        </RunSynchronousCommand>",
+    ]
+lines += [
+    "      </RunSynchronous>",
+    "      <!-- ONTRAK_NO_SECUREBOOT_END -->",
+    "    </component>",
+]
+
+with open(path, "w", encoding="utf-8") as fh:
+    fh.write(s.replace(anchor, "\n".join(lines), 1))
+PYEOF
+    if grep -q 'ONTRAK_NO_SECUREBOOT_BEGIN' "$UNATTEND"; then
+      log "Windows Setup TPM/Secure Boot checks bypassed in $(basename "$UNATTEND")"
+    else
+      warn "could not inject the Setup bypass: the installer may still stop on the TPM/Secure Boot check"
+    fi
+  fi
 fi
 
 # ------------------------------------------------------------------- build ----

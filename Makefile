@@ -18,10 +18,11 @@ REMOTE_OVERLAY := -f docker-compose.yml -f docker-compose.remote.yml
 
 .PHONY: help setup secrets check doctor validate test lint demo \
         catalog catalog-validate media-status media-fetch generate schedule \
-        templates pool reap demo-serve host-image landing \
+        golden templates pool reap demo-serve host-image landing \
         installer-iso installer-iso-smoke installer-iso-test \
         build up up-remote down logs ps exec check-compose setup-log \
-        docker-demo docker-shell provision provision-plan console-recreate
+        docker-demo docker-shell provision provision-plan console-recreate \
+        local-auth local-auth-down
 
 help: ## Show this help message
 	@echo "OnTrak — operator workflow"
@@ -102,6 +103,15 @@ console-recreate: ## Recreate just the console gateway, so its JSON_SECRET_KEY m
 	$(COMPOSE) up -d --force-recreate guacamole
 	@echo "==> recreated; now confirm: make check   (or: make exec ARGS=doctor)"
 
+local-auth: ## Start the local Authentik and point this range at it (deploy/authentik)
+	@# A range signed into without the estate being reachable: its own Authentik, its
+	@# own database, and the four ONTRAK_PORTAL__OIDC_* values handed to compose as a
+	@# second --env-file. See docs/operations.md "A local Authentik".
+	bash deploy/authentik/setup.sh --connect
+
+local-auth-down: ## Stop the local Authentik (its database is kept)
+	bash deploy/authentik/setup.sh --down
+
 down: ## Stop the stack (keeps the state, media and secrets volumes)
 	$(COMPOSE) down
 
@@ -164,6 +174,27 @@ media-status: ## Show which installation media is present, fetchable or operator
 
 media-fetch: ## Download the freely redistributable media (evaluation ISOs and images)
 	$(PY) -m ontrak media fetch
+
+## ---- Range content (hours, and not part of a compose up) ----------------
+# The golden Windows image every template is cloned from, and the templates
+# themselves. Both are long, both need real Windows media, and in practice they
+# are re-run separately: the image when evaluation media expires, the templates
+# when a scenario changes. `make golden` is what the bootstrap summary, the
+# installer's first boot and docs/operations.md all tell an operator to run — so
+# it has to exist here.
+
+golden: ## Build the golden Windows image (30-60 min; downloads Windows eval media)
+	@test -f .env || { echo "no .env — run 'make secrets' first (or 'make setup')"; exit 2; }
+	@# The training account password is the one thing this recipe needs out of
+	@# .env, and it is read with sed rather than sourced: .env is a *compose* env
+	@# file, so values are unquoted and some of them contain spaces
+	@# (ONTRAK_PORTAL__BRAND_NOTE does). Compose takes the rest of the line; a
+	@# shell splits it, so `set -a; . ./.env` cheerfully tries to run "support" as
+	@# a command and sets the variable to a fragment. The same sed-extract is what
+	@# docker/lab-setup.sh and the Guacamole entrypoint use, for the same reason.
+	@guest="$$(sed -n 's/^ONTRAK_GUEST__PASSWORD=//p' .env | head -1)"; \
+	test -n "$$guest" || { echo "ONTRAK_GUEST__PASSWORD is empty in .env — run 'make secrets'"; exit 2; }; \
+	ONTRAK_GUEST__PASSWORD="$$guest" bash infra/build-golden-image.sh
 
 ## ---- Range operations ---------------------------------------------------
 

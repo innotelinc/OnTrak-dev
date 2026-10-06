@@ -13,7 +13,7 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRAINLAB="${PROJECT_ROOT}/.venv/bin/ontrak"
 
-[[ -x "$TRAINLAB" ]] || { echo "run 'make venv' first" >&2; exit 1; }
+[[ -x "$TRAINLAB" ]] || { echo "run 'make setup' first" >&2; exit 1; }
 
 if [[ $# -gt 0 ]]; then
   exec "$TRAINLAB" template build "$@"

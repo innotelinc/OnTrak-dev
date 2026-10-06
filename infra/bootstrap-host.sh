@@ -77,7 +77,14 @@ if ! command -v incus >/dev/null; then
   # often a few releases behind, and Windows VM support moves fast.
   log "installing incus from the upstream stable repository"
   install -d -m 0755 /etc/apt/keyrings
-  curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --dearmor -o /etc/apt/keyrings/zabbly.gpg
+  # --batch --yes, because this script promises to be idempotent and gpg is not:
+  # with the keyring already in place, --dearmor otherwise stops to ask whether
+  # to overwrite it, and there is no tty to answer on (a container, a CI run, a
+  # non-interactive sudo), so it exits non-zero and `set -e` takes the whole
+  # bootstrap with it — on a re-run, which is the one time it was supposed to do
+  # nothing.
+  curl -fsSL https://pkgs.zabbly.com/key.asc \
+    | gpg --batch --yes --dearmor -o /etc/apt/keyrings/zabbly.gpg
   # shellcheck disable=SC1091  # read fresh, for the codename this host reports
   codename="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
   echo "deb [signed-by=/etc/apt/keyrings/zabbly.gpg] https://pkgs.zabbly.com/incus/stable ${codename} main" \
@@ -212,7 +219,22 @@ if ! incus --project "$PROJECT" profile list --format=csv -c n | grep -qx "ontra
   log "creating the ontrak-student limits profile"
   incus --project "$PROJECT" profile create ontrak-student
 fi
-incus --project "$PROJECT" profile edit ontrak-student < "$PROJECT_ROOT/infra/incus/profile.yaml"
+# ------------------------------------------------ reachability from the host --
+# The range publishes one port on 0.0.0.0, but Docker implements that with a DNAT
+# rule in the nat OUTPUT chain — so this host cannot reach its own published
+# address, while every other machine can. That is the state in which an operator
+# curls the portal, gets nothing, and concludes the range is down. The rule to
+# make it work lives in infra/host-local-hairpin.sh, which explains the whole
+# mechanism; installing it here also gives the host a systemd unit, because on a
+# WSL host the rule is gone at the next restart.
+#
+# Non-fatal on purpose: it needs systemd, and a host that has just proved it can
+# run VMs should not fail to finish because one firewall rule could not be kept.
+if [[ -x "$PROJECT_ROOT/infra/host-local-hairpin.sh" ]]; then
+  log "making this host able to reach the ports it publishes"
+  "$PROJECT_ROOT/infra/host-local-hairpin.sh" --install \
+    || warn "could not install the local-hairpin rule — published ports stay reachable only from other machines"
+fi
 
 # ------------------------------------------------------------------ summary ---
 DRIVER="$(storage_driver)"
@@ -227,7 +249,7 @@ $(log "bootstrap complete")
   profile         : ontrak-student (2 vCPU / 4 GiB — edit infra/incus/profile.yaml to taste)
 
 Next steps:
-  1. make venv && make doctor          # verify the control plane sees all of this
+  1. make setup && make doctor         # verify the control plane sees all of this
   2. make golden                       # build the golden Windows image (long)
   3. infra/lab-services.sh             # create the intranet targets the scenarios test against
   4. make templates                    # build tpl-<scenario> + clean snapshots

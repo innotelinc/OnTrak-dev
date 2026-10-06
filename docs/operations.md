@@ -256,6 +256,40 @@ for the whole class: a cluster does not make a cold Windows boot faster.
 | Who is an instructor | membership of the Authentik group in `ONTRAK_PORTAL__OIDC_INSTRUCTOR_GROUP` (read on every sign-in). There is no local account to promote — change the group in Authentik |
 | Reclaim RAM fast | set `pool.targets` to 0, then `ontrak pool status` and delete pool VMs, or just stop them with `incus stop` |
 
+### Building the golden image on a nested host
+
+`make golden` boots a Windows 11 virtual machine and lets Windows Setup install
+into it. Windows 11 Setup requires Secure Boot, and on a UEFI guest Secure Boot
+means **SMM**. A host whose own virtualisation is *nested* may not be able to
+virtualise SMM at all, and then the build cannot finish. `infra/build-golden-image.sh`
+refuses to start when it recognises that host shape (`ONTRAK_GOLDEN_ALLOW_NESTED=1`
+overrides the check).
+
+The host it refuses is nested AMD KVM — a range host that is itself a guest, e.g.
+**WSL2/Hyper-V on a Ryzen**. Four configurations were measured there and none
+installs:
+
+| Configuration | Result |
+| --- | --- |
+| Secure Boot + TPM (the default for `11e`) | VM goes to `ERROR` seconds after launch; its qemu log ends `KVM: entry failed, hardware error 0xffffffff` with `SMM=1` |
+| `ONTRAK_GOLDEN_NO_SECUREBOOT=1` (no TPM, no Secure Boot) | the same crash — OVMF uses SMM for its runtime services even with Secure Boot off |
+| `-machine smm=off` (bare, and as `q35,smm=off`) | no crash, but the guest spins at 100% CPU and never writes a sector |
+| legacy BIOS (`security.csm=true`, SeaBIOS — no SMM at all) | reaches "Booting from Hard Disk..." and then spins the same way |
+
+So there is nothing to configure around it on that host. Build where the kernel's
+virtualisation is **not** nested and move the result:
+
+1. On a suitable host — bare-metal Linux, a Linux desktop, or a cloud VM with
+   nested virtualisation — run `make golden`, then `make templates` there and let
+   the range point at that host; or
+2. run `make golden` there and import the image onto the range host
+   (`incus --project ontrak image import ...`, alias `ontrak-win-base`; the
+   script's header and closing notes show the exact paths).
+
+On a host without the image, `ontrak doctor` keeps reporting
+`golden image 'ontrak-win-base' missing`, and Windows sessions cannot start. That
+is accurate, not a bug.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -263,6 +297,8 @@ for the whole class: a cluster does not make a cold Windows boot faster.
 | Session sits in `provisioning`, then `error` | guest transport never answered | Check `session.error` on the page, then `ONTRAK_INCUS__REMOTE=... incus --project ontrak info <instance>`; confirm the guest has an IP on `ontrak0`. If RDP is up but WinRM is not, the image's `post-install.ps1` step did not run — rebuild the golden image. |
 | `make golden` reports success but every Windows template then hangs at the firmware boot prompt, and `ontrak doctor` still says the golden image is present | the ISO install was OOM-killed and the half-applied disk was published as the image. Incus gives a VM disk the host write cache by default, so applying the ~7 GiB Windows image is charged to the container's memory cgroup; on a 16 GiB range host the kernel kills qemu part-way through the apply. The pinned builder (`tools/click.py`) then only waits for `incus ls` to report STOPPED — it cannot tell that kill from the clean sysprep shutdown it expects — and `pack.sh` publishes the truncated disk anyway | `infra/build-golden-image.sh` now sets the build disk to `io.cache=none` and bounds the guest RAM (`ONTRAK_GOLDEN_CPUS`/`ONTRAK_GOLDEN_MEMORY`), which removes the pressure that caused the kill. Re-run `make golden`. To check a suspect image, inspect its ESP: a formatted-but-empty ESP (no `EFI/Microsoft/Boot/bootmgfw.efi`) means the apply never finished |
 | `make golden` gets all the way through the install and then fails part-way through publishing, and from that point every `incus` command fails with `Failed to begin transaction: no available cowsql leader server found` or `context deadline exceeded` | `incus publish` tars the build disk's *apparent* size into the image — holes are not skipped — and the image store shares a dataset with Incus's own cowsql database, so a long enough copy starves the database's leader election and takes the daemon's DB with it. The bigger the build disk, the worse it gets: a 60 GiB disk copied with `--compression none` ran for fourteen minutes before wedging the DB, and a 29 GiB one ran fifteen | Size the build disk small (already done: `ONTRAK_GOLDEN_DISK`, default 32 GiB) and let `incus publish` keep its default gzip (`--compression none` is the mistake, not the fix). If the DB is already wedged, `systemctl restart incus` clears it — the installed disk survives, so recover rather than rebuild: publish that instance instead of re-running the 30-60 minute install |
+| `make golden` stops immediately with `this host looks like nested AMD KVM ... cannot virtualise SMM` | the host is itself a guest on an AMD CPU (e.g. WSL2/Hyper-V on a Ryzen), and nested AMD SVM cannot virtualise SMM — Windows 11 Setup needs it | Build on a host where KVM is **not** nested and copy the image in; see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host). `ONTRAK_GOLDEN_ALLOW_NESTED=1` skips the check, but the build then dies with `KVM: entry failed, hardware error 0xffffffff` |
+| `make golden` fails seconds in, and the build VM's qemu log ends `KVM: entry failed, hardware error 0xffffffff` with `SMM=1` | the host cannot virtualise SMM and Windows 11 Setup needs it. Disabling Secure Boot and the TPM does not help (OVMF uses SMM for its runtime services regardless), and `-machine smm=off` hangs the guest instead | Move the build to a host where KVM is not nested — see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host) |
 | `ontrak template build` fails with `incus list --format=json failed (124): timed out after 120s`, even though `ONTRAK_INCUS__OPERATION_TIMEOUT_SECONDS` is raised | the plumbing used to fall back to its own 120 s default for reads, ignoring the operator's setting. `incus list` is not a cheap read on a busy host: it reports each instance's state, agent status and address, so it blocks for minutes on a VM that is still booting | Fixed — the configured timeout is the ceiling for every call. If you are on an older build, raise the default in `incus.py` or pacify the host first |
 | `pywinrm` errors with 401 | wrong training password, or the account is not a local admin | Compare with `guest.password`; the image sets `LocalAccountTokenFilterPolicy=1` so elevation should work |
 | Template build fails with "never obtained an address" | wrong bridge or DHCP range exhausted | `incus network get ontrak0 ipv4.dhcp.ranges`; widen the range for large classes |
@@ -277,6 +313,7 @@ for the whole class: a cluster does not make a cold Windows boot faster.
 | Pool keeps growing and the host swaps | refill targets too high for a full class | Lower `pool.targets`, or `pool.max_total`; remember targets count claimed VMs, so `target = class size` is the right shape |
 | Grading returns 0% with "grading could not run" | `check.ps1` failed or never printed the markers | Run it manually in a session; `make validate` first, then check the guest-side error in the network detail line |
 | Scores look wrong after an image change | the check reads live state that moved (an adapter name, a service name) | Prefer outcome-based checks (`docs/scenarios.md`); open a session and inspect the `-Detail` strings |
+| `curl http://<this host>:8080/` from the host itself hangs or resets, while another machine reaches the same URL | Docker publishes the port with a DNAT rule in `nat OUTPUT`, so a connection from the host to the host's own address is rewritten to the container's address, from a source its reply can never match | `sudo infra/host-local-hairpin.sh --install` — the script's header explains the mechanism, `--check` says whether it is in place, `--remove` takes it out. On a WSL host the rule does not survive a restart by itself, which is what the installed unit is for |
 
 ## Sign-in
 
@@ -342,7 +379,48 @@ the person in Authentik; use disable for the range's own control.
 
 `ontrak demo serve` is the one exception, and only for itself: a demo has no IdP
 to sign in against, so the portal opens a demo-only door — pick a demo account,
-no password — mounted only while `demo.enabled` is on.
+no password — mounted only while `demo.enabled` is on. Demo mode and Authentik are
+independent settings, though, so a local range can have both at once; see below.
+
+### A local Authentik, for a laptop, a demo or CI
+
+Everything above is the estate's Authentik: Cerulean registers the application and
+prints its client secret, and a range cannot be signed into without it. For the
+ranges that must be signed into anyway — a laptop, a demo on a table, CI — this
+checkout carries a second one: `deploy/authentik/`, its own compose project with
+its own database and its own secret key, holding nothing the estate knows about.
+
+```bash
+deploy/authentik/setup.sh          # generate secrets, start, provision OnTrak
+make local-auth                    # ...and point this range at it
+deploy/authentik/setup.sh --down   # stop it (the database is kept)
+```
+
+It creates the application, an OIDC provider, the `groups` scope mapping,
+`range-instructors`/`range-students` and a set of seed accounts, then writes
+`deploy/authentik/ontrak-local.env`: the four `ONTRAK_PORTAL__OIDC_*` values, the
+instructor group, and the address students are sent to. `make local-auth` hands
+that file to compose as a second `--env-file`, so it wins where the two disagree
+and the operator's `.env` is never written to. Going back to the estate's
+Authentik is running compose without it — which also means a plain
+`docker compose up -d` puts the range back, so re-run `make local-auth` after one.
+
+Three details that are not obvious:
+
+* **The issuer is the host's own address, not `localhost`.** It has to resolve, and
+  give the same answer, for the student's browser *and* for the portal container —
+  and `localhost` is the container itself to the container. The callbacks
+  registered on the provider follow from that: every origin the range answers on
+  has to be listed, the same rule the three estate names above follow.
+* **It is not for production.** Plain HTTP, its admin password in the file next to
+  it, and seed accounts that share one password. `deploy/authentik/README.md` says
+  so at more length.
+* **A local range runs on demo mode.** There are no hypervisor-backed machines
+  until the golden image exists (`make golden`), so `ontrak-local.env` also sets
+  `ONTRAK_DEMO__ENABLED=true` and scenarios come from demo mode's in-memory range.
+  That combination — a real IdP, the real portal, an in-memory range — is what makes
+  a whole class demonstrable on a laptop: students sign in through Authentik, start
+  scenarios and are graded. Turn it off once the image and templates exist.
 
 ## Security and audit notes
 
@@ -367,7 +445,10 @@ no password — mounted only while `demo.enabled` is on.
   or use volume licensing with KMS/AD for permanent infrastructure. Licence
   compliance for training VMs is the operator's responsibility.
 * **Hosts:** nothing in this stack needs a commercial hypervisor; Linux + KVM +
-  Incus covers it. The Zabbly repository is the upstream Incus channel.
+  Incus covers it. The Zabbly repository is the upstream Incus channel. One caveat,
+  for the golden image only: the host's KVM must not be nested if its CPU is AMD —
+  see [Building the golden image on a nested
+  host](#building-the-golden-image-on-a-nested-host).
 * **Third-party build tool:** `antifob/incus-windows` automates the unattended
   Windows install. Pin a commit (`ONTRAK_INCUS_WINDOWS_REF`) — it is a build-time
   dependency, not a runtime one, and its interface changes between versions. Two of

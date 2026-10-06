@@ -1,0 +1,149 @@
+# ============================================================================
+# OnTrak — a local Authentik, on its own.
+#
+# The range's sign-in is Authentik's (see docs/operations.md "Sign-in"), and in
+# a real deployment that Authentik belongs to Cerulean — the estate's identity
+# provider, shared with every other application. This stack is the *local* one:
+# a single-purpose Authentik for a laptop or a demo host, so a range can be
+# signed into without the estate being reachable at all. It is deliberately not
+# part of docker-compose.yml: it is a second, independent project with its own
+# database and its own lifetime, and taking the range down must not take the
+# identity provider down with it.
+#
+#   deploy/authentik/setup.sh          # generate secrets, start, provision OnTrak
+#   docker compose -f deploy/authentik/compose.yaml --env-file deploy/authentik/.env logs -f
+#
+# Nothing above the provider is shared with Cerulean: separate Postgres, separate
+# Redis, separate secret key. A range wired to this one is a range no estate user
+# can sign into, which is the point.
+#
+# Four containers, the same shape as the upstream compose file:
+#
+#   server   the Authentik web application and its API (the one published port)
+#   worker   background work: flows, outposts, scheduled tasks
+#   postgresql  Authentik's database (its own volume, not OnTrak's)
+#   redis    the cache and task queue
+#
+# Note that the upstream file also mounts /var/run/docker.sock into the worker so
+# Authentik can deploy *outposts* for you. This one does not: a demo range needs
+# no outpost, and a container with the Docker socket is a container with root on
+# the host. Add the mount back if you ever need a proxy or LDAP outpost here.
+# ============================================================================
+name: ontrak-authentik
+
+services:
+  postgresql:
+    image: ${AUTHENTIK_POSTGRES_IMAGE:-docker.io/library/postgres:16-alpine}
+    container_name: ontrak-authentik-postgresql
+    restart: unless-stopped
+    healthcheck:
+      # $$ so compose leaves the dollar alone: the variable is evaluated inside
+      # the container, where POSTGRES_DB and POSTGRES_USER actually live.
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASS:?run deploy/authentik/setup.sh first — it writes .env}
+      POSTGRES_USER: ${PG_USER:-authentik}
+      POSTGRES_DB: ${PG_DB:-authentik}
+    volumes:
+      - database:/var/lib/postgresql/data
+    networks: [authentik]
+
+  redis:
+    image: ${AUTHENTIK_REDIS_IMAGE:-docker.io/library/redis:alpine}
+    container_name: ontrak-authentik-redis
+    restart: unless-stopped
+    command: --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 3s
+    volumes:
+      - redis:/data
+    networks: [authentik]
+
+  server:
+    # A local identity provider is still an identity provider: pin the release
+    # rather than tracking a floating tag — and note that upstream publishes no
+    # `latest` at all (the floating ones are `stable` and the year.month tags),
+    # so `latest` here is a pull that fails. This is the release the API calls in
+    # provision.py are written against; move AUTHENTIK_TAG in .env to upgrade.
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2026.8.3}
+    container_name: ontrak-authentik-server
+    restart: unless-stopped
+    command: server
+    environment: &authentik-env
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:?run deploy/authentik/setup.sh first — it writes .env}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?run deploy/authentik/setup.sh first — it writes .env}
+      # Local and standing on a table: no telemetry, no update pings.
+      AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+      AUTHENTIK_DISABLE_UPDATE_CHECK: "true"
+      # The two things that make this stack scriptable at all. bootstrap_password
+      # is akadmin's password (the UI login); bootstrap_token is an API token for
+      # akadmin, which deploy/authentik/provision.py uses to create the OnTrak
+      # application, its provider, the groups and the seed users — no clicking
+      # through the setup wizard by hand.
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:?run deploy/authentik/setup.sh first — it writes .env}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:?run deploy/authentik/setup.sh first — it writes .env}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-}
+    ports:
+      # 0.0.0.0 by default: the portal container reaches the issuer through this
+      # port too, and so does a browser on another machine. 127.0.0.1 is not
+      # enough — the issuer URL has to be one address that both can use, which is
+      # the host's own, and a container calling that address needs it published.
+      - "${AUTHENTIK_BIND_ADDR:-0.0.0.0}:${AUTHENTIK_HTTP_PORT:-9000}:9000"
+    volumes:
+      # uploads (avatars, icons) and the templates directory the image expects.
+      - media:/media
+      - templates:/templates
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [authentik]
+
+  worker:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2026.8.3}
+    container_name: ontrak-authentik-worker
+    restart: unless-stopped
+    command: worker
+    user: root
+    environment: *authentik-env
+    volumes:
+      - media:/media
+      - templates:/templates
+      # the worker's own CA bundle, so a certificate added here is trusted by the
+      # tasks that make outbound requests.
+      - certs:/etc/ssl/certs
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [authentik]
+
+volumes:
+  database:
+    name: ontrak-authentik-database
+  redis:
+    name: ontrak-authentik-redis
+  media:
+    name: ontrak-authentik-media
+  templates:
+    name: ontrak-authentik-templates
+  certs:
+    name: ontrak-authentik-certs
+
+networks:
+  authentik:
+    name: ontrak-authentik
