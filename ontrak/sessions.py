@@ -746,8 +746,18 @@ class SessionManager:
         for device in scenario.instance_devices:
             options = {k: v for k, v in device.items() if k not in {"name", "type"}}
             # A nic device on a network name is the common case: resolve it to the
-            # configured lab bridge so scenarios stay portable.
-            if device.get("type") == "nic" and options.get("network") in {None, "lab"}:
+            # configured lab bridge so scenarios stay portable. A device that already
+            # says how it attaches -- 'nictype' or 'parent', an unmanaged adapter -- is
+            # left exactly as declared. Incus refuses the two together ("Cannot use
+            # \"nictype\" property in conjunction with \"network\" property"), and an
+            # extra adapter has to be unmanaged anyway: a second NIC on the lab network
+            # is rejected over the instance's own DNS record.
+            attaches_itself = options.get("nictype") or options.get("parent")
+            if (
+                device.get("type") == "nic"
+                and not attaches_itself
+                and options.get("network") in {None, "lab"}
+            ):
                 options["network"] = self.settings.incus.network
             incus.add_device(name, device["type"], device["name"], **options)
 

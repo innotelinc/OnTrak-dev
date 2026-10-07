@@ -9,10 +9,17 @@ tags: [drivers, devices, device-manager, level-3]
 # This scenario needs a second network device to break. It is attached when the
 # template is built (see below) because you cannot add hardware to a guest from
 # inside the guest. The device is what the student has to bring back to life.
+#
+# It is an unmanaged point-to-point adapter rather than a second card on the lab
+# bridge: Incus refuses two NICs on one managed network ("Instance DNS name
+# conflict ... because both are connected to same network") because both would
+# claim the instance's own DNS record, and eth0 already owns ontrak0. A p2p
+# adapter still carries a live link, which is what the grading script reads back
+# with Get-NetAdapter, so enabling it really does bring the port back up.
 instance_devices:
   - name: eth1
     type: nic
-    network: ontrak0
+    nictype: p2p
 
 ticket:
   from: "Facilities helpdesk (via Sam Whitfield)"

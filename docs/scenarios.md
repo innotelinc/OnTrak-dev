@@ -41,6 +41,12 @@ shows as a yellow warning triangle. The student fixes it with enable/rescan/
 reinstall-driver, and grading accepts any of those because it grades the outcome
 (no disabled or unhealthy adapters) rather than the method.
 
+The extra adapter is an unmanaged `nictype: p2p` device rather than a second card
+on the lab bridge. Incus refuses two NICs on one managed network — *"Instance DNS
+name conflict ... because both are connected to same network"* — since each adapter
+would claim the instance's own DNS record, and `eth0` already owns the lab network.
+A `p2p` adapter still carries a live link, so re-enabling it brings the port up.
+
 ## The lab fact sheet
 
 Scenarios share one fictional estate so that tickets reinforce each other:
@@ -94,9 +100,9 @@ objectives:                    # the grading contract
 hints:                         # revealed one at a time, most generic first
   - "Start with ipconfig /all"
 instance_devices:              # optional: extra hardware, applied at template build
-  - name: eth1
-    type: nic
-    network: ontrak0
+  - name: eth1                 # an unmanaged NIC: an extra adapter cannot share the
+    type: nic                  # lab bridge with eth0 (Incus rejects two NICs on one
+    nictype: p2p               # managed network), and p2p still has a live link
 instance_config:               # optional: extra incus config keys
   limits.memory: 4GiB
 resources: []                  # optional files uploaded with setup.ps1
@@ -221,7 +227,9 @@ rather than copying logic between scenarios.
 * **Common wrong answer:** leaving it disabled and calling it "cleanup". Grading is
   outcome-based on purpose: enable, rescan and driver-reinstall all pass.
 * **Requires:** `instance_devices` support (the extra NIC) — the build fails loudly
-  with a clear message if the second adapter is missing.
+  with a clear message if the second adapter is missing. The extra adapter must be
+  an unmanaged NIC (`nictype: p2p`); `ontrak scenario validate` rejects a second card
+  on the lab network before the build gets that far.
 
 ### 6. `sec-malware-persistence` — "EDR alert: unexpected persistence and a new administrator" (security, 4/4)
 

@@ -134,13 +134,17 @@ def test_template_build_requires_the_golden_image(settings, store, repo):
         manager.ensure_template(SCENARIO)
 
 
-def test_scenario_declared_devices_are_attached_to_the_template(manager, incus, settings):
+def test_scenario_declared_devices_are_attached_to_the_template(manager, incus):
     name = manager.ensure_template("hw-driver-device")
     devices = [d for d in incus.devices if d[0] == name]
     assert devices, "the hardware scenario needs its second NIC attached before first boot"
     _, kind, device_name, options = devices[0]
     assert (kind, device_name) == ("nic", "eth1")
-    assert options["network"] == settings.incus.network
+    # An unmanaged adapter, passed through untouched. Incus refuses a second NIC on the
+    # lab bridge (duplicate DNS name) and refuses "nictype" together with "network",
+    # so the lab network must not be filled in for a device that names its own
+    # attachment -- filling it in is exactly what made this template unbuildable.
+    assert options == {"nictype": "p2p"}
 
 
 def test_build_templates_reports_per_scenario_results(manager):

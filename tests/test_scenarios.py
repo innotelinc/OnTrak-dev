@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -63,10 +64,33 @@ def test_weights_and_critical_flags_are_sane(repo):
 
 
 def test_hardware_scenario_declares_its_extra_device(repo):
+    """The extra adapter must be unmanaged, not a second NIC on the lab network.
+
+    Incus refuses two NICs on one managed network ("Instance DNS name conflict
+    between eth1 and eth0 because both are connected to same network") because each
+    would claim the instance's own DNS record, and eth0 already owns the lab bridge.
+    A p2p adapter carries a live link, so enabling it really does restore the port.
+    """
     scenario = repo.get("hw-driver-device")
     assert scenario.instance_devices, "the device scenario needs a second NIC"
     device = scenario.instance_devices[0]
-    assert device["type"] == "nic" and device["network"]
+    assert device["type"] == "nic"
+    assert device["nictype"] == "p2p"
+    assert "network" not in device, "a p2p adapter must not also name a network"
+
+
+def test_validate_rejects_a_second_nic_on_the_lab_network(repo, tmp_path):
+    """The failure this validator exists to catch, at validate time, not 15 minutes in.
+
+    Regression test: ``scenario.yaml`` used to declare ``network: ontrak0`` for its
+    extra adapter, and the mismatch only surfaced when the template finally built.
+    """
+    target = tmp_path / "hw-driver-device"
+    shutil.copytree(repo.get("hw-driver-device").directory, target)
+    manifest = target / "scenario.yaml"
+    manifest.write_text(manifest.read_text().replace("nictype: p2p", "network: lab"))
+    problems = "\n".join(ScenarioRepository(tmp_path).validate())
+    assert "cannot join the lab network" in problems
 
 
 def test_validate_catches_a_broken_scenario(tmp_path):

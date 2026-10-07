@@ -456,16 +456,46 @@ class ScenarioRepository:
             for resource in scenario.resources:
                 if not (scenario.directory / resource).exists():
                     problems.append(f"{prefix} declared resource {resource!r} does not exist")
+            # Extra hardware. A NIC attaches either as a managed device (``network:``)
+            # or as an unmanaged one (``nictype:``/``parent:``).
+            managed_networks: list[str] = []
             for device in scenario.instance_devices:
                 if not device.get("name") or not device.get("type"):
                     problems.append(
                         f"{prefix} each entry in instance_devices needs a 'name' and a 'type'"
                     )
-                elif device.get("type") == "nic" and not device.get("network"):
+                    continue
+                if device.get("type") != "nic":
+                    continue
+                # An unmanaged device (nictype: p2p, macvlan, ...) brings its own
+                # attachment, so it needs no network name.
+                if device.get("nictype") or device.get("parent"):
+                    continue
+                network = str(device.get("network") or "")
+                if not network:
                     problems.append(
-                        f"{prefix} nic device {device['name']!r} needs a 'network' "
-                        "(build would fail without one)"
+                        f"{prefix} nic device {device['name']!r} needs either a 'network' "
+                        "or a 'nictype' (e.g. nictype: p2p) so the build knows how it "
+                        "attaches"
                     )
+                    continue
+                managed_networks.append(network)
+
+            # The profile's eth0 is already on the lab network, and Incus refuses two
+            # NICs on one managed network — "Instance DNS name conflict between X and
+            # Y because both are connected to same network", since each adapter would
+            # claim the instance's own DNS record. ``lab`` is the sentinel the builder
+            # resolves to that network, so an extra NIC may never name it, and may not
+            # name the same concrete network twice either.
+            for network in sorted(
+                {n for n in managed_networks if n == "lab" or managed_networks.count(n) > 1}
+            ):
+                shown = "the lab network" if network == "lab" else f"network {network!r}"
+                problems.append(
+                    f"{prefix} an extra NIC cannot join {shown}, which eth0 already "
+                    "holds; Incus rejects a second NIC on one managed network "
+                    "(duplicate DNS name). Attach it with 'nictype: p2p' instead"
+                )
         return problems
 
 
