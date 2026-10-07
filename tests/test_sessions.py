@@ -11,7 +11,7 @@ from ontrak.incus import IncusError
 from ontrak.models import SessionState, iso, parse_iso, utcnow
 from ontrak.qemu import KVM, TCG
 from ontrak.scenarios import JSON_BEGIN, JSON_END, SETUP_OK_MARKER
-from ontrak.sessions import POOL_SNAPSHOT, SessionError, SessionManager
+from ontrak.sessions import POOL_SNAPSHOT, SETUP_ATTEMPTS, SessionError, SessionManager
 
 SCENARIO = "net-dns-failure"
 OBJECTIVES = ["restore-resolver", "resolve-intranet", "reach-service"]
@@ -123,6 +123,105 @@ def test_template_build_fails_loudly_when_setup_does_not_confirm(settings, store
         manager.ensure_template(SCENARIO)
     assert not incus.has_snapshot(settings.incus.template_name(SCENARIO), POOL_SNAPSHOT)
     assert incus.instance_status(settings.incus.template_name(SCENARIO)) == "STOPPED"
+
+
+# --------------------------------------------------------------------------- #
+# a fault that cuts the connection its own result travels over
+# --------------------------------------------------------------------------- #
+# net-static-ip-conflict turns its adapter off DHCP, and Windows tears the interface
+# down with the lease: the socket the build is reading the setup script's result over
+# dies, so ONTRAK-SETUP-OK never arrives even though the fault applied perfectly. The
+# scenario failed every build until the build learned to reconnect and ask again.
+
+
+class ScriptedGuest(NullDriver):
+    """A guest that answers setup.ps1 with a scripted sequence of results.
+
+    Each entry is ``(ok, stdout)``. An empty ``stdout`` is exactly what a cut channel
+    looks like -- no marker, and no reason either -- and is the only case the build is
+    allowed to ask again after: a run that came back with text answered the question,
+    even when the answer was no.
+    """
+
+    def __init__(self, settings, results, on_served=None):
+        super().__init__(settings, responses={})
+        self.results = list(results)
+        self.on_served = on_served
+        self.setup_runs = 0
+        self.setup_hosts: list[str] = []
+
+    def run_powershell(self, script, host="", instance="", timeout=120):
+        from ontrak.guest import CommandResult
+
+        if "setup.ps1" not in script:
+            return super().run_powershell(script, host=host, instance=instance, timeout=timeout)
+        self.setup_runs += 1
+        self.setup_hosts.append(host)
+        if self.on_served is not None:
+            self.on_served(instance)
+        ok, stdout = self.results[min(self.setup_runs, len(self.results)) - 1]
+        return CommandResult(ok, 0 if ok else 1, stdout, "")
+
+
+def scripted_manager(settings, store, repo, incus, results, on_served=None):
+    driver = ScriptedGuest(settings, results, on_served=on_served)
+    return SessionManager(settings, store, repo=repo, incus=incus, driver=driver), driver
+
+
+def test_a_fault_that_cuts_its_own_channel_is_asked_again(settings, store, repo, incus):
+    manager, driver = scripted_manager(
+        settings, store, repo, incus, [(False, ""), (True, f"{SETUP_OK_MARKER}\n")]
+    )
+    name = manager.ensure_template("net-static-ip-conflict")
+    assert driver.setup_runs == 2, "the fault should be asked again exactly once"
+    assert incus.has_snapshot(name, POOL_SNAPSHOT), "the build must still finish"
+
+
+def test_the_second_ask_is_dialled_at_the_address_incus_now_reports(settings, store, repo, incus):
+    """The point of a fault like this one is that the guest's network changed.
+
+    Whatever moved it -- its address, its adapter -- the build has to ask the guest
+    where it is rather than dial the address it started with.
+    """
+
+    def move(instance):
+        incus.instances[instance]["ip"] = "10.20.0.77"
+
+    manager, driver = scripted_manager(
+        settings,
+        store,
+        repo,
+        incus,
+        [(False, ""), (True, f"{SETUP_OK_MARKER}\n")],
+        on_served=move,
+    )
+    manager.ensure_template("net-static-ip-conflict")
+    assert driver.setup_hosts[-1] == "10.20.0.77", driver.setup_hosts
+    assert driver.setup_hosts[0] != driver.setup_hosts[-1]
+
+
+def test_a_setup_script_that_reports_its_own_failure_is_not_asked_again(
+    settings, store, repo, incus
+):
+    """A script that ran and failed says why; repeating it would not help."""
+    manager, driver = scripted_manager(
+        settings,
+        store,
+        repo,
+        incus,
+        [(True, "the addressing fault did not apply; refusing to report success\n")],
+    )
+    with pytest.raises(SessionError, match=SETUP_OK_MARKER):
+        manager.ensure_template("net-static-ip-conflict")
+    assert driver.setup_runs == 1, "a reported failure was treated as a cut channel"
+
+
+def test_repeated_cuts_stop_after_a_bounded_number_of_attempts(settings, store, repo, incus):
+    """A guest that never answers must not be re-asked forever."""
+    manager, driver = scripted_manager(settings, store, repo, incus, [(False, "")])
+    with pytest.raises(SessionError, match=SETUP_OK_MARKER):
+        manager.ensure_template("net-static-ip-conflict")
+    assert driver.setup_runs == SETUP_ATTEMPTS
 
 
 def test_template_build_requires_the_golden_image(settings, store, repo):

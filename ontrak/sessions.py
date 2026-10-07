@@ -69,6 +69,15 @@ TEMPLATE_PSEUDO_STUDENT = "<template>"
 # template build asserts on it rather than trusting the exit code of a pipeline.
 CONSOLE_SETUP_MARKER = "ontrak-console-ready"
 
+# How many times a template build will ask a scenario to inject its fault. More than
+# one, because a fault is allowed to cut the connection its own result travels over --
+# turning an adapter off DHCP does exactly that -- and then the only way to hear the
+# result is to reconnect and ask again. Bounded because each attempt is a whole run.
+SETUP_ATTEMPTS = 3
+# Time for the guest to settle the change that cut the last attempt, before the retry
+# dials the address Incus now reports for it.
+SETUP_RETRY_DELAY_SECONDS = 5
+
 
 def console_transport_script(settings: Settings) -> str:
     """The shell that turns a Linux guest into one the browser console can open.
@@ -574,12 +583,7 @@ class SessionManager:
             self._await_guest(session, self._ready_timeout(scenario), driver=driver)
             self._upload_scenario_files(session, scenario, include_setup=True, driver=driver)
             setup_name = SETUP_NAMES[scenario.platform]
-            result = driver.run_script_file(
-                self._join(scenario, "scenarios", scenario_id, setup_name),
-                timeout=self.settings.session.check_timeout_seconds,
-                **self._guest_args(session),
-            )
-            combined = (result.stdout or "") + (result.stderr or "")
+            result, combined = self._run_setup(session, scenario, driver, setup_name)
             if not result.ok or SETUP_OK_MARKER not in combined:
                 raise SessionError(
                     f"{setup_name} for {scenario_id} did not report {SETUP_OK_MARKER} "
@@ -598,6 +602,57 @@ class SessionManager:
         label = f"{scenario_id}@{workload}" if workload else scenario_id
         self.store.log_event("template_built", f"{label} -> {name}/{POOL_SNAPSHOT}")
         return name
+
+    def _run_setup(self, session: Session, scenario, driver: BaseDriver, setup_name: str):
+        """Run the fault-injection script, tolerating a fault that cuts its own channel.
+
+        Some faults deliberately break the guest's connectivity, and a template build
+        reads the script's result *over* that connectivity: switching an adapter off
+        DHCP ends the WinRM/SSH session mid-script, so the marker never arrives even
+        though the fault applied perfectly. ``net-static-ip-conflict`` is the shipped
+        case, and it failed every build until this existed.
+
+        So a first attempt that came back with nothing at all is retried, on a fresh
+        connection to wherever the guest now is. "Nothing at all" is the discriminator
+        that matters: a script that *ran* and failed reports why, and repeating it
+        would not help. A scenario that does this is expected to recognise its own
+        fault and say so rather than re-apply it (docs/scenarios.md, "Faults that cut
+        their own channel").
+        """
+        remote = self._join(scenario, "scenarios", scenario.id, setup_name)
+        result = None
+        combined = ""
+        for attempt in range(1, SETUP_ATTEMPTS + 1):
+            result = driver.run_script_file(
+                remote,
+                timeout=self.settings.session.check_timeout_seconds,
+                **self._guest_args(session),
+            )
+            combined = (result.stdout or "") + (result.stderr or "")
+            if result.ok and SETUP_OK_MARKER in combined:
+                return result, combined
+            if result.stdout or attempt == SETUP_ATTEMPTS:
+                return result, combined
+            # The guest may still be settling the change that cut the first attempt,
+            # and the address it moved to is only known to Incus.
+            time.sleep(SETUP_RETRY_DELAY_SECONDS)
+            moved = self._require_incus().instance_ip(session.instance) or ""
+            if not moved:
+                return result, combined
+            if moved != session.host_ip:
+                self.store.log_event(
+                    "setup_retry",
+                    f"{scenario.id}: {setup_name} moved the guest to {moved}; asking again",
+                    session.id,
+                )
+                session.host_ip = moved
+            else:
+                self.store.log_event(
+                    "setup_retry",
+                    f"{scenario.id}: {setup_name} lost its connection; asking again",
+                    session.id,
+                )
+        return result, combined
 
     def _provision_console_transport(self, session: Session, scenario, driver: BaseDriver) -> None:
         """Put an sshd in this Linux template, so the browser console can be a shell.

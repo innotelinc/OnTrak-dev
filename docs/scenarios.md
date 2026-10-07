@@ -115,7 +115,34 @@ reset_notes: |                 # shown to students about what reset does
 `setup.ps1` injects the fault and **must** finish with `Write-OnTrakSetupOk`
 (which prints `ONTRAK-SETUP-OK`). Template build refuses to snapshot a scenario
 whose setup did not confirm, so a half-applied fault can never reach a student.
-Write your setup to be idempotent: rebuilding a template is a normal operation.
+Write your setup to be idempotent: rebuilding a template is a normal operation, and
+so is being asked to run twice (see below).
+
+### Faults that cut their own channel
+
+A build reads `setup.ps1`'s result over the guest's own network (WinRM, or SSH for
+Linux). A fault that breaks that network can therefore cut the connection carrying
+its own confirmation: `net-static-ip-conflict` turns the adapter off DHCP, and
+Windows tears the interface down with the lease, so `ONTRAK-SETUP-OK` never arrives
+although the fault applied perfectly.
+
+The build handles that by asking again: a first attempt that came back with **no
+output at all** — the signature of a severed channel — is retried on a fresh
+connection, to whatever address Incus now reports, up to a small bounded number of
+attempts. A run that returns *text* is an answer, even when the answer is no, and is
+never repeated.
+
+Two rules follow for a scenario like this:
+
+* **Recognise your own work.** The second ask arrives with the fault already in
+  place, so check first and report rather than re-apply — re-applying the addressing
+  change would cut the connection the retry is using. See the guard at the top of
+  `scenarios/net-static-ip-conflict/setup.ps1`.
+* **Don't move a machine that the range has to find.** Incus reports a virtual
+  machine's address from its DHCP lease (the golden image carries no Incus agent),
+  so a guest that leaves DHCP and takes a *different* address becomes unreachable to
+  the console, the grader and the pool: keep the address it already has, and change
+  only how it was obtained and what it routes through.
 
 `check.ps1` calls `Add-OnTrakCheck` once per objective and then `Write-OnTrakReport`
 exactly once. The payload is JSON between two markers, which makes grading immune
