@@ -59,6 +59,17 @@ die()  { printf '\033[31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 [[ -n "$PY" ]] || die "python3 not found (needed to verify the disk)"
 command -v "$ORAS" >/dev/null || die "oras not found — set ONTRAK_ORAS to its path, or install it (https://oras.land)"
 
+# Pin a path-shaped oras to an absolute one before anything changes directory. The
+# push below runs from inside the export directory (oras refuses an absolute layer
+# path, so the layers have to be named relative to it), and by then a path written
+# the obvious way — `ONTRAK_ORAS=build/bin/oras`, from the project root — resolves
+# against the export directory instead and the push dies with "No such file or
+# directory" after the login has already succeeded. A bare name is left alone: PATH
+# lookups work from any directory.
+if [[ "$ORAS" == */* ]]; then
+  ORAS="$(cd "$(dirname "$ORAS")" && pwd)/$(basename "$ORAS")"
+fi
+
 # ------------------------------------------------------------------ the export --
 DIR="${1:-}"
 if [[ -z "$DIR" ]]; then
