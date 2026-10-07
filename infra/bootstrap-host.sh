@@ -73,7 +73,13 @@ apt-get install -y --no-install-recommends \
   qemu-system-x86 qemu-utils \
   xorriso genisoimage \
   python3-venv python3-pip \
+  ovmf swtpm swtpm-tools \
   >/dev/null
+# ovmf and swtpm are not hard dependencies of every Incus package, and both are
+# needed for a Windows guest: OVMF for its UEFI (and, under Secure Boot, its SMM)
+# and swtpm for its TPM 2.0. A host that is missing them can install Incus, take
+# the golden build, and fail an hour in — or, on a host that needs the emulated
+# CPU, fail at the preflight instead. Naming them here is cheaper than either.
 
 if ! command -v incus >/dev/null; then
   # Upstream (Zabbly) packages track current Incus; the Ubuntu archive copy is

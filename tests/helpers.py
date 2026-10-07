@@ -63,6 +63,12 @@ class FakeIncus:
             )
         return out
 
+    def get_instance(self, name: str) -> InstanceInfo | None:
+        for info in self.list_instances():
+            if info.name == name:
+                return info
+        return None
+
     def exists(self, name: str) -> bool:
         return name in self.instances
 
@@ -130,6 +136,12 @@ class FakeIncus:
 
     def delete_snapshot(self, instance: str, snapshot: str) -> None:
         self.snapshots.get(instance, set()).discard(snapshot)
+
+    def config_get(self, instance: str, key: str) -> str:
+        for name, config_key, value in reversed(self.configs):
+            if name == instance and config_key == key:
+                return value
+        return ""
 
     def set_config(self, instance: str, key: str, value) -> None:
         self.configs.append((instance, key, value))

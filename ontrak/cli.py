@@ -25,7 +25,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__, guac, selection
+from . import __version__, guac, qemu, selection
 from .catalog import Catalog
 from .config import ConfigError, load_settings, require_secrets
 from .demo import run_demo
@@ -295,6 +295,31 @@ def cmd_doctor(args) -> int:
         except ImportError:
             _say(FAIL, "guest.driver=winrm but pywinrm is not installed")
             failures += 1
+
+    print()
+    print("QEMU accelerator")
+    # Which accelerator the Windows guests get, and why. Reported on every host,
+    # not only the ones that need the fallback: on those it is the difference
+    # between a guest that starts and one that goes to ERROR ten seconds later,
+    # and everywhere else it is the answer to "why is this template build slow".
+    accelerator = qemu.report()
+    _say(OK if accelerator["accel"] == qemu.KVM else WARN, accelerator["reason"])
+    firmware_code = accelerator["ovmf"].get("code")
+    firmware_vars = accelerator["ovmf"].get("vars")
+    if firmware_code and firmware_vars:
+        _say(INFO, f"OVMF {firmware_code} and {firmware_vars}")
+    else:
+        _say(WARN, "no OVMF CODE/VARS image found — a Windows guest needs one to boot")
+    if accelerator["missing_packages"]:
+        note = "missing for a Windows guest: " + " ".join(accelerator["missing_packages"])
+        # Blocking only where something builds a Windows guest: a Linux-only range
+        # runs perfectly well on a host without OVMF, and calling it a failure
+        # there reads as a broken range when nothing is broken.
+        if ctx.manager is None or ctx.manager.golden_image_required():
+            _say(FAIL, note)
+            failures += 1
+        else:
+            _say(INFO, note + " (nothing on this range builds a Windows guest)")
 
     print()
     print("Console gateway")

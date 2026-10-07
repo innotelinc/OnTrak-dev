@@ -89,6 +89,7 @@ REWRITES = (
     ("pack_disk_size", ("32GiB",)),
     ("pack_keep_vm", ("ontrak-winpack-build",)),
     ("pack_no_secureboot", ()),
+    ("pack_qemu_accel", ()),
 )
 
 
@@ -177,6 +178,35 @@ class PackShRewriteTests(unittest.TestCase):
         # And a line that merely mentions `incus config set` is left alone.
         self.assertIn("apparmr | incus config set \"${name}\" raw.apparmor=-", text)
 
+    def test_the_accelerator_hook_lands_before_the_installer_starts(self):
+        """The accelerator has to be in place before `click.py` boots Windows.
+
+        Everything above it in pack.sh is still just configuration; `click.py` is
+        where the VM is started, so a hook after it would be a hook that runs
+        against a guest that has already failed to start.
+        """
+        path = self._apply("pack_qemu_accel")
+        lines = self._lines(path)
+        hook = next(index for index, line in enumerate(lines) if "ONTRAK_QEMU_ACCEL_BEGIN" in line)
+        installer = next(index for index, line in enumerate(lines) if "click.py" in line)
+        self.assertLess(hook, installer, "the accelerator is set after the VM is started")
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("ONTRAK_QEMU_ACCEL_END", text)
+        # The rewrite calls the shared helper rather than deciding anything: the
+        # templates and the student sessions ask ontrak/qemu.py the same question.
+        self.assertIn('"${ONTRAK_QEMU_ACCEL_HELPER}" --apply "${name}"', text)
+        # Unset helper means this host has KVM and the hook does nothing at all.
+        self.assertIn('\tif [ -n "${ONTRAK_QEMU_ACCEL_HELPER:-}" ]; then', text)
+
+    def test_the_accelerator_hook_is_not_added_again(self):
+        path = self._apply("pack_qemu_accel")
+        once = path.read_text(encoding="utf-8")
+        for _ in range(3):
+            result = _run("pack_qemu_accel", path)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(path.read_text(encoding="utf-8"), once)
+        self.assertEqual(once.count("ONTRAK_QEMU_ACCEL_BEGIN"), 1)
+
     # ------------------------------------------------------------ idempotence --
 
     def test_every_rewrite_is_a_no_op_the_second_time(self):
@@ -228,6 +258,21 @@ class PackShRewriteTests(unittest.TestCase):
             0,
             "a pack.sh that no longer names its VM as expected was reported as pinned",
         )
+
+    def test_a_pack_sh_with_no_installer_call_is_reported_not_swallowed(self):
+        moved = UPSTREAM_PACK_SH.replace(
+            'python3 "${PROGBASE}/click.py" "${name}"', "sh run-windows-install"
+        )
+        path = self._fixture(moved)
+        result = _run("pack_qemu_accel", path)
+        self.assertNotEqual(
+            result.returncode,
+            0,
+            "a pack.sh that no longer starts Windows with click.py was reported as "
+            "hooked; on a host that cannot virtualise SMM the build would then die "
+            "at 'KVM: entry failed' with nothing having said why",
+        )
+        self.assertEqual(path.read_text(encoding="utf-8"), moved, "the file was edited anyway")
 
     def test_a_rewrite_refuses_a_file_it_cannot_read(self):
         result = _run("pack_keep_vm", self.directory / "absent.sh", "ontrak-winpack-build")

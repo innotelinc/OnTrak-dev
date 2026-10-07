@@ -264,13 +264,9 @@ for the whole class: a cluster does not make a cold Windows boot faster.
 `make golden` boots a Windows 11 virtual machine and lets Windows Setup install
 into it. Windows 11 Setup requires Secure Boot, and on a UEFI guest Secure Boot
 means **SMM**. A host whose own virtualisation is *nested* may not be able to
-virtualise SMM at all, and then the build cannot finish. `infra/build-golden-image.sh`
-refuses to start when it recognises that host shape (`ONTRAK_GOLDEN_ALLOW_NESTED=1`
-overrides the check).
-
-The host it refuses is nested AMD KVM — a range host that is itself a guest, e.g.
-**WSL2/Hyper-V on a Ryzen**. Four configurations were measured there and none
-installs:
+virtualise SMM at all. The host that does this is nested AMD KVM — a range host
+that is itself a guest, e.g. **WSL2/Hyper-V on a Ryzen**. Four configurations were
+measured there:
 
 | Configuration | Result |
 | --- | --- |
@@ -279,8 +275,65 @@ installs:
 | `-machine smm=off` (bare, and as `q35,smm=off`) | no crash, but the guest spins at 100% CPU and never writes a sector |
 | legacy BIOS (`security.csm=true`, SeaBIOS — no SMM at all) | reaches "Booting from Hard Disk..." and then spins the same way |
 
-So there is nothing to configure around it on that host. Build where the kernel's
-virtualisation is **not** nested and move the result:
+None of those is a setting to get right: the host cannot do the one thing the guest
+needs, and every attempt to ask for less of it produces a guest that is not the one
+this range teaches on. What works is not asking the host to virtualise at all.
+
+#### The emulated fallback
+
+QEMU can emulate the CPU instead, and both the golden build and the range use it
+automatically where KVM cannot run the guest. Nothing about the guest is reduced
+for it — Q35, UEFI on OVMF, SMM, the writable per-VM VARS store, Secure Boot and
+TPM 2.0 on swtpm all stay exactly as Incus configured them. What changes is the
+CPU, and the speed.
+
+Where the QEMU command line comes from is worth knowing, because it decides how
+this can be done at all: **incusd writes it**, from the instance's config, and no
+part of this repository writes one. For a VM it ends up as
+
+```
+qemu-system-x86_64 … -cpu host,hv_passthrough … -readconfig /run/incus/<instance>/qemu.conf
+```
+
+with `[machine] accel = "kvm"` inside that config file. So the accelerator is
+chosen by `raw.qemu.conf` (merged into the generated file, and it does override
+`[machine]`) and the CPU model by `raw.qemu` (appended last, and QEMU takes the
+last `-cpu`):
+
+```
+raw.qemu.conf:  [machine]
+                accel = "tcg"
+raw.qemu:       -cpu max
+```
+
+`ontrak/qemu.py` decides whether that is needed — usable `/dev/kvm`, what
+`systemd-detect-virt` says, and the CPU vendor — and `infra/qemu-accel.sh` is how
+the build asks it. Both halves of the range share the one decision, so the
+templates and the student sessions are set up by the same rule as the build.
+
+* **It is a host fact, not a scenario or workload fact.** `ontrak template build`
+  applies it when the template is created, which is where every Windows instance
+  is born: the pool and every student's machine are clones of it and inherit it.
+* **See what this host decided**: `infra/qemu-accel.sh --check` prints the chosen
+  accelerator, the firmware it found, and anything the software path is missing.
+  `infra/qemu-accel.sh --reason` is the one-line version.
+* **Overrule it**: `ONTRAK_QEMU_ACCEL=kvm` or `=tcg` settles it for this host.
+  `ONTRAK_GOLDEN_REQUIRE_KVM=1` refuses the build instead of emulating it, which
+  is what `ONTRAK_GOLDEN_ALLOW_NESTED=1` used to mean (`ONTRAK_GOLDEN_ALLOW_NESTED`
+  no longer exists — there is nothing left to allow).
+* **Give the build more room**: `ONTRAK_GOLDEN_ADDRESS_ATTEMPTS` (default 60, or
+  240 on an emulated host) is how many times, 5 seconds apart, the build waits for
+the build VM's address.
+
+It costs time. An already-*installed* Windows 11 image reaches the network in
+about four minutes on a WSL2/AMD host, where KVM gets there in seconds; an install
+into a blank disk is several times longer again than its normal 30-60 minutes. The
+preflight for it is the packages it needs — `qemu-system-x86`, `qemu-utils`, `ovmf`,
+`swtpm`, `swtpm-tools` — which `infra/bootstrap-host.sh` installs.
+
+Building somewhere else and copying the result in is still the faster path if you
+have such a host. Build where the kernel's virtualisation is **not** nested and
+move the result:
 
 1. On a suitable host — bare-metal Linux, a Linux desktop, or a cloud VM with
    nested virtualisation — run `make golden`, then `make templates` there and let
@@ -447,12 +500,13 @@ rather than published.
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Session sits in `provisioning`, then `error` | guest transport never answered | Check `session.error` on the page, then `ONTRAK_INCUS__REMOTE=... incus --project ontrak info <instance>`; confirm the guest has an IP on `ontrak0`. If RDP is up but WinRM is not, the image's `post-install.ps1` step did not run — rebuild the golden image. |
+| Session sits in `provisioning`, then `error` | guest transport never answered | Check `session.error` on the page, then `ONTRAK_INCUS__REMOTE=... incus --project ontrak info <instance>`; confirm the guest has an IP on `ontrak0`. If RDP is up but WinRM is not, the image's `post-install.ps1` step did not run — rebuild the golden image. If *nothing* answers, see the row below. |
+| A Windows guest has an address and answers ARP, but every port times out with **no RST** — 5985, 3389, 445 and 135 alike — and its qemu log stays empty | Windows Firewall is dropping everything inbound, which is what it does on a network profile it treats as **Public**: the image's WinRM rules are only active on Domain and Private. It is not the SMM fault — that one leaves `KVM: entry failed, hardware error 0xffffffff` and `SMM=1` in the qemu log and puts the instance in `ERROR` — and it is not the network, because ARP resolving proves the path. The guest is running; nothing can reach it | Fixed in the *install*, so that no network is needed for it: `infra/incus-windows-pack.sh` adds a declarative firewall group that activates the Windows Remote Management rules on every profile in the autounattend, and `infra/windows/golden-local/main.ps1` — which the build puts on the unattended ISO as `local/main.ps1`, where upstream's `OEM/main.ps1` dot-sources it — runs `Enable-PSRemoting -SkipNetworkProfileCheck` and explicit 5985/3389 rules for `-Profile Any` at first logon, which also guarantees the *listener* exists. `scripts/tests/test_unattend_winrm.py` and `scripts/tests/test_golden_local.py` keep both applying. **An image built before that fix carries this fault**, and nothing on the range can repair it: OnTrak's own repair is `post-install.ps1`, which runs `Enable-PSRemoting -SkipNetworkProfileCheck` but is applied *over WinRM* — the lock is on the door with the key behind it. Rebuild the image (`make golden`, or on a host that needs the emulated CPU see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host)), then re-import or re-publish it. **Do not** put the listener half back into the autounattend as a `RunSynchronousCommand`: an over-long `Path` does not fail the command, it invalidates the whole answer file, and Windows Setup then blocks the install in the `specialize` pass with nothing in the qemu log and a guest that never stops — `infra/incus-windows-pack.sh` has the measured error and `scripts/tests/test_unattend_winrm.py` bounds the length |
 | `make golden` reports success but every Windows template then hangs at the firmware boot prompt, and `ontrak doctor` still says the golden image is present | the ISO install was OOM-killed and the half-applied disk was published as the image. Incus gives a VM disk the host write cache by default, so applying the ~7 GiB Windows image is charged to the container's memory cgroup; on a 16 GiB range host the kernel kills qemu part-way through the apply. The pinned builder (`tools/click.py`) then only waits for `incus ls` to report STOPPED — it cannot tell that kill from the clean sysprep shutdown it expects — and `pack.sh` publishes the truncated disk anyway | `infra/build-golden-image.sh` now sets the build disk to `io.cache=none` and bounds the guest RAM (`ONTRAK_GOLDEN_CPUS`/`ONTRAK_GOLDEN_MEMORY`), which removes the pressure that caused the kill. Re-run `make golden`. To check a suspect image, inspect its ESP: a formatted-but-empty ESP (no `EFI/Microsoft/Boot/bootmgfw.efi`) means the apply never finished |
 | `make golden` gets all the way through the install and then fails part-way through publishing, and from that point every `incus` command fails with `Failed to begin transaction: no available cowsql leader server found` or `context deadline exceeded` | `incus publish` tars the build disk's *apparent* size into the image — holes are not skipped — and the image store shares a dataset with Incus's own cowsql database, so a long enough copy starves the database's leader election and takes the daemon's DB with it. The bigger the build disk, the worse it gets: a 60 GiB disk copied with `--compression none` ran for fourteen minutes before wedging the DB, and a 29 GiB one ran fifteen | Size the build disk small — that is the lever this script has, and it is already set (`ONTRAK_GOLDEN_DISK`, default 32 GiB). Note that the pinned builder publishes with `--compression none` on purpose: its export step extracts the disk from a plain `.tar`, and `incus image export` writes `<fingerprint>.tar.gz` when the image is gzipped, which that step cannot read. If the DB is already wedged, `systemctl restart incus` clears it — the installed disk survives, so recover rather than rebuild: publish that instance instead of re-running the 30-60 minute install |
-| `make golden` stops immediately with `this host looks like nested AMD KVM ... cannot virtualise SMM` | the host is itself a guest on an AMD CPU (e.g. WSL2/Hyper-V on a Ryzen), and nested AMD SVM cannot virtualise SMM — Windows 11 Setup needs it | Build on a host where KVM is **not** nested and copy the image in; see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host). `ONTRAK_GOLDEN_ALLOW_NESTED=1` skips the check, but the build then dies with `KVM: entry failed, hardware error 0xffffffff` |
-| `make golden` fails seconds in, and the build VM's qemu log ends `KVM: entry failed, hardware error 0xffffffff` with `SMM=1` | the host cannot virtualise SMM and Windows 11 Setup needs it. Disabling Secure Boot and the TPM does not help (OVMF uses SMM for its runtime services regardless), and `-machine smm=off` hangs the guest instead | Move the build to a host where KVM is not nested — see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host) |
-| A Windows instance goes to `ERROR` a few seconds after it starts — `ontrak template build` on the golden image, or a student session — and its qemu log ends `KVM: entry failed, hardware error 0xffffffff` with `SMM=1` | the same host limit as the row above, except that it stops *running* the image and not only building it, so it is worth recognising here. Every Windows VM this range hands out therefore fails on such a host, and the instance reports `RUNNING` for the ten seconds before it doesn't | Set `security.secureboot=false` if you like, but it will not help — OVMF needs SMM for its runtime services either way — and confirm the host with `systemd-detect-virt` plus `grep vendor_id /proc/cpuinfo`. Windows has to run where KVM is not nested: bare metal, or a host with nested virtualisation. Scenarios that name a workload are unaffected, because those guests are containers |
+| `make golden` stops immediately with `ONTRAK_GOLDEN_REQUIRE_KVM=1, and this host cannot give the guest KVM` | that variable was set, and this host is itself a guest on an AMD CPU (e.g. WSL2/Hyper-V on a Ryzen), whose nested SVM cannot virtualise SMM — Windows 11 Setup needs it | Leave it unset and let QEMU emulate the CPU (see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host)); it is several times slower but it finishes. Or build on a host where KVM is **not** nested and copy the image in |
+| `make golden` fails seconds in on a nested AMD host, and the build VM's qemu log ends `KVM: entry failed, hardware error 0xffffffff` with `SMM=1` | the build VM was started on KVM anyway, which means the accelerator hook never reached it. The fallback is applied by a hook this range writes into the checkout's `tools/pack.sh`, and the build warns when it cannot — `could not add the accelerator hook to tools/pack.sh` | Look for that warning in the build's own output and re-read `infra/incus-windows-pack.sh` against the pinned checkout. On a build VM that was kept, set it by hand: `infra/qemu-accel.sh --apply <vm> default`. Disabling Secure Boot and the TPM is not the fix — OVMF uses SMM for its runtime services regardless, and `-machine smm=off` hangs the guest instead |
+| A Windows instance goes to `ERROR` a few seconds after it starts — `ontrak template build` on the golden image, or a student session — and its qemu log ends `KVM: entry failed, hardware error 0xffffffff` with `SMM=1` | the same host limit as the row above, except that it stops *running* the image and not only building it. Templates are set up for the emulated fallback when they are built and the clones inherit it, so an instance that still fails was either made before that existed or did not go through `ontrak` | Confirm what this host decided with `infra/qemu-accel.sh --check`, then set it on the instance: `infra/qemu-accel.sh --apply <instance>` — stopped, because Incus refuses `raw.qemu.conf` on a running VM — and rebuild the template so future clones carry it. This row is about the CPU only: `security.secureboot=false` does not help, and the guest still has to be Windows |
 | `ontrak template build` (or `session start`) fails with `Error: This virtual machine image requires an agent:config disk be added` | the golden image carries `requirements.cdrom_agent=true`. incus-windows' `tools/pack.sh` stamps it on every image it publishes, `incus publish` copies image properties, and the property also travels in the export's `metadata.yaml` — so it arrives with the image and cannot be dropped by importing without the flag. It means "every instance from this image must have an `agent:config` disk", and Incus enforces it at *start*, where nothing in `ontrak/` attaches one: OnTrak drives Windows over WinRM, which needs no agent config | Fixed — `infra/import-golden-image.sh` and `infra/build-golden-image.sh` clear the property as they adopt the image. To repair one that is already imported: `incus --project ontrak image set-property ontrak-win-base requirements.cdrom_agent=""` (`incus image unset-property` panics with a nil pointer in Incus 7.5.1). Operators using the opt-in `incus-exec` driver want the requirement back, with the disk: `incus config device add <vm> incusagent disk source=agent:config` |
 | `ontrak template build` fails with `incus list --format=json failed (124): timed out after 120s`, even though `ONTRAK_INCUS__OPERATION_TIMEOUT_SECONDS` is raised | the plumbing used to fall back to its own 120 s default for reads, ignoring the operator's setting. `incus list` is not a cheap read on a busy host: it reports each instance's state, agent status and address, so it blocks for minutes on a VM that is still booting | Fixed — the configured timeout is the ceiling for every call. If you are on an older build, raise the default in `incus.py` or pacify the host first |
 | `make golden` fails after a long install with `Error: Failed to begin transaction: sql: database is closed`, then `incus ls` fails with `Error: Image not found`, and the build VM is gone | something on the host restarted `incus` while the build was running, and `tools/pack.sh` deleted its build VM from an EXIT trap on the way out. An unattended `apt` upgrade is enough: `unattended-upgrades` and `apt-daily*.timer` are enabled by default, `ovmf`/`qemu-efi-*` upgrades are routine, and the restart kills a running build | Current builds keep the VM (`ontrak-winpack-build`) so the installed disk survives, and a new run stops rather than overwrite it — recover with [Recovering a build VM that was kept](#recovering-a-build-vm-that-was-kept) instead of rebuilding. The script does not *disable* the host's update timers, but it does name the ones it finds at the start of a build and tell you to stop them; they return at the next boot, which is deliberate — a build should not leave a range's security updates off |

@@ -45,6 +45,15 @@ POWERSHELL = "powershell"
 # Windows command lines are capped (cmd.exe 8k, WinRM envelopes larger but not
 # unbounded); 32 KB of base64 per call is safely inside every transport.
 UPLOAD_CHUNK = 32_000
+# The same upload has to survive two very different transports, and only one of them is
+# roomy. A Linux guest is handed the payload in a heredoc on stdin, where 32k is cheap.
+# WinRM runs each chunk as a PowerShell `-EncodedCommand` on a Windows command line,
+# which the guest refuses with "The command line is too long" long before that:
+# measured against an 8197-byte post-install.ps1 whose 10,932-character base64 became
+# roughly 14,600 characters of -EncodedCommand, and failed uploading at offset 0. 2,000
+# holds the whole command line near a third of the limit, which is the room the
+# -EncodedCommand wrapper, the file paths and Add-Content's own arguments need.
+WINRM_UPLOAD_CHUNK = 2_000
 
 
 @dataclass
@@ -150,6 +159,10 @@ class BaseDriver:
             Path(local_path).read_bytes(), remote_path, host=host, instance=instance, timeout=timeout
         )
 
+    # How much base64 goes on one command line. Overridden where the transport is
+    # narrower than the payload: see WINRM_UPLOAD_CHUNK.
+    upload_chunk = UPLOAD_CHUNK
+
     def _write_bytes(
         self,
         data: bytes,
@@ -175,8 +188,8 @@ class BaseDriver:
         if not result.ok:
             raise GuestError(f"cannot prepare {parent}: {result.stderr or result.stdout}")
 
-        for offset in range(0, len(b64), UPLOAD_CHUNK):
-            chunk = b64[offset : offset + UPLOAD_CHUNK]
+        for offset in range(0, len(b64), self.upload_chunk):
+            chunk = b64[offset : offset + self.upload_chunk]
             result = run(
                 f"Add-Content -Path {quote_ps(remote_b64)} -Value '{chunk}' "
                 "-NoNewline -Encoding Ascii"
@@ -382,6 +395,9 @@ class SSHDriver(ShellRunner):
 
 class WinRMDriver(BaseDriver):
     name = "winrm"
+    # A Windows command line is the narrow one; a scenario's setup.ps1 or this
+    # repository's own post-install.ps1 is what makes it matter.
+    upload_chunk = WINRM_UPLOAD_CHUNK
 
     def _session(self, host: str):
         try:

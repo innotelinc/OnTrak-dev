@@ -290,6 +290,19 @@ class IncusClient:
     def delete_snapshot(self, instance: str, snapshot: str) -> None:
         self.run(["snapshot", "delete", instance, snapshot], timeout=self.timeout)
 
+    def config_get(self, instance: str, key: str) -> str:
+        """Read one instance config key, or "" when it is not set.
+
+        A key that was never set is not an error, and `incus config get` exits
+        non-zero for it, so the exit code is the answer rather than a failure to
+        raise. That is what lets :mod:`ontrak.qemu` merge rather than overwrite: it
+        has to know what is already there before it adds to it.
+        """
+        proc = self.run(["config", "get", instance, key], check=False)
+        if proc.returncode != 0:
+            return ""
+        return (proc.stdout or "").strip()
+
     def set_config(self, instance: str, key: str, value: Any) -> None:
         self.run(["config", "set", instance, f"{key}={value}"])
 

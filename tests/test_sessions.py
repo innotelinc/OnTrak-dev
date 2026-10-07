@@ -9,6 +9,7 @@ from ontrak.demo import synthesise_ticket
 from ontrak.guest import NullDriver
 from ontrak.incus import IncusError
 from ontrak.models import SessionState, iso, parse_iso, utcnow
+from ontrak.qemu import KVM, TCG
 from ontrak.scenarios import JSON_BEGIN, JSON_END, SETUP_OK_MARKER
 from ontrak.sessions import POOL_SNAPSHOT, SessionError, SessionManager
 
@@ -48,6 +49,45 @@ def test_template_build_injects_the_fault_and_snapshots(manager, incus, settings
     assert incus.exists(name)
     assert incus.has_snapshot(name, POOL_SNAPSHOT)
     assert incus.instance_status(name) == "STOPPED"  # snapshots come from a clean power-off
+
+
+# --------------------------------------------------------------------------- #
+# the host's accelerator
+# --------------------------------------------------------------------------- #
+def test_a_template_on_a_host_that_cannot_run_kvm_is_emulated(manager, incus, monkeypatch):
+    """The point of the fallback: the guest starts on a host that cannot do SMM.
+
+    incusd writes `-cpu host,hv_passthrough` and `[machine] accel = "kvm"` for every
+    VM, and on a host whose KVM is nested on AMD that guest goes to ERROR seconds
+    after it starts. A template that cannot boot is a range that hands out broken
+    machines, so the accelerator is set when the template is made — and the clones
+    inherit it, which is what makes the pool and the students' VMs work too.
+    """
+    monkeypatch.setenv("ONTRAK_QEMU_ACCEL", TCG)
+    manager.ensure_template(SCENARIO)
+    name = settings_template(manager)
+    written = {key: value for instance, key, value in incus.configs if instance == name}
+    assert 'accel = "tcg"' in written["raw.qemu.conf"]
+    assert "-cpu max" in written["raw.qemu"]
+    # And at no cost to the guest: this is about the CPU, not about dropping what
+    # Windows 11 needs to boot.
+    assert not [key for key in written if "secureboot" in key.lower() or "tpm" in key.lower()]
+
+
+def test_a_template_on_a_kvm_host_is_never_touched(manager, incus, monkeypatch):
+    monkeypatch.setenv("ONTRAK_QEMU_ACCEL", KVM)
+    manager.ensure_template(SCENARIO)
+    assert not [c for c in incus.configs if c[1] in {"raw.qemu", "raw.qemu.conf"}]
+
+
+def test_the_boot_deadline_is_longer_where_the_cpu_is_emulated(manager, monkeypatch):
+    """A Windows guest on an emulated CPU reaches WinRM in minutes, not seconds."""
+    scenario = manager.repo.get(SCENARIO)
+    monkeypatch.setenv("ONTRAK_QEMU_ACCEL", KVM)
+    on_kvm = manager._ready_timeout(scenario)
+    monkeypatch.setenv("ONTRAK_QEMU_ACCEL", TCG)
+    emulated = manager._ready_timeout(scenario)
+    assert emulated > on_kvm
 
 
 def test_an_unknown_scenario_id_is_reported_rather_than_skipped(manager):

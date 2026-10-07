@@ -43,6 +43,9 @@ from .guest import (
 )
 from .incus import IncusClient, IncusError
 from .models import ScoreReport, Session, SessionState, iso, parse_iso, seconds_since, utcnow
+from .qemu import TCG
+from .qemu import accel as qemu_accel
+from .qemu import apply as apply_qemu_accel
 from .scenarios import (
     CHECK_NAMES,
     COMMON_LIB,
@@ -534,6 +537,27 @@ class SessionManager:
             )
         self._apply_instance_spec(name, scenario)
 
+        # Which accelerator this guest runs on is a property of the *host*, not of
+        # the scenario, and this is where it is decided — the pool and every
+        # student's machine are clones of this template, and a clone carries the
+        # instance's config with it.
+        #
+        # It matters because incusd writes `-cpu host,hv_passthrough` and
+        # `[machine] accel = "kvm"` for every VM, and on a host whose KVM cannot
+        # virtualise SMM — which is what Secure Boot needs — the guest cannot start
+        # at all. Under KVM this writes nothing. It has to happen while the instance
+        # is still stopped: Incus refuses `raw.qemu.conf` on a running VM, and the
+        # guest is started just below.
+        info = incus.get_instance(name)
+        if info is not None and info.kind == "virtual-machine":
+            chosen = apply_qemu_accel(incus, name)
+            if chosen == TCG:
+                self.store.log_event(
+                    "qemu_accel",
+                    f"{name}: this host cannot give the guest KVM, so it runs on QEMU's "
+                    "software emulator (slower to boot; nothing else about it changes)",
+                )
+
         driver = self._driver_for(scenario)
         session = Session(
             id=None,
@@ -631,9 +655,21 @@ class SessionManager:
         )
 
     def _ready_timeout(self, scenario) -> int:
+        """How long to wait for the guest's transport. Longer under emulation.
+
+        The configured timeout is a policy about class size, not a measurement of
+        the host, and it was set where the CPU is real. A Windows guest on an
+        emulated CPU takes minutes rather than seconds to answer WinRM, so it is
+        scaled — by 1, on every host that has KVM, so nothing changes there.
+        """
         if getattr(scenario, "platform", WINDOWS) == LINUX:
             return self.settings.guest.linux_ready_timeout_seconds
-        return self.settings.guest.ready_timeout_seconds
+        return self.settings.guest.ready_timeout_seconds * self._accel_timeout_scale
+
+    @property
+    def _accel_timeout_scale(self) -> int:
+        """What the host's accelerator costs a guest's boot, as a multiplier."""
+        return 4 if qemu_accel() == TCG else 1
 
     # ------------------------------------------------------------------
     # workloads (which OS/build a guest runs)
