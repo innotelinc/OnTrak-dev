@@ -185,10 +185,31 @@ def test_the_cli_prints_the_accelerator(capsys, monkeypatch):
     assert capsys.readouterr().out.strip() == TCG
 
 
-def test_the_cli_reports_what_it_found(capsys):
+def test_the_cli_reports_what_it_found(capsys, monkeypatch):
+    """The report is the contract; the exit code is *this host's* readiness.
+
+    ``check`` is a preflight for the machine that will build the guests, so on a
+    TCG host that has what it needs it exits 0. Both host-dependent inputs are
+    pinned here rather than read: a CI runner has neither the packages nor the
+    firmware, and a test that asserted its readiness would be asserting the
+    runner rather than this module.
+    """
+    monkeypatch.setenv("ONTRAK_QEMU_ACCEL", TCG)
+    monkeypatch.setattr(qemu, "missing_packages", lambda: [])
+    monkeypatch.setattr(qemu, "ovmf", lambda: {"code": "/ovmf/CODE.fd", "vars": "/ovmf/VARS.fd"})
     assert qemu.main(["check"]) == 0
     out = capsys.readouterr().out
     assert '"accel"' in out and '"ovmf"' in out
+
+
+def test_the_cli_refuses_a_host_that_cannot_build(capsys, monkeypatch):
+    """The reason the preflight exists: a TCG host missing QEMU, OVMF or swtpm
+    fails here rather than hours into a build, and names what to install."""
+    monkeypatch.setenv("ONTRAK_QEMU_ACCEL", TCG)
+    monkeypatch.setattr(qemu, "missing_packages", lambda: ["swtpm"])
+    monkeypatch.setattr(qemu, "ovmf", dict)
+    assert qemu.main(["check"]) == 1
+    assert "swtpm" in capsys.readouterr().err
 
 
 def test_the_cli_says_how_to_use_it(capsys):
