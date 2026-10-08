@@ -391,7 +391,7 @@ def test_the_demo_door_signs_in_an_account_with_no_password(settings, incus):
     from ontrak.portal.app import create_app
 
     if TestClient is None:  # pragma: no cover - exercised only without fastapi
-        pytest.skip("fastapi/httpx not installed")
+        pytest.skip("fastapi/httpx2 not installed")
     settings.demo.enabled = True
     settings.demo.students = 2
     app = create_app(settings, incus=incus, driver=None)

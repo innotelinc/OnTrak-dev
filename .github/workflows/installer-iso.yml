@@ -65,10 +65,10 @@ permissions:
 jobs:
   iso:
     name: Build the installer ISO
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # A remaster holds the base image, the tree extracted from it and the result
       # at the same time — about 12 GB, and the base image is kept for the repack
@@ -188,7 +188,7 @@ jobs:
             "$RUNNER_TEMP/user-data" > "$RUNNER_TEMP/user-data.redacted"
           cat "$RUNNER_TEMP/manifest.txt"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: installer-iso-manifest
           path: |
@@ -214,7 +214,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends qemu-system-x86
           bash infra/build-installer-iso.sh 2>&1 | tee "$RUNNER_TEMP/iso-smoke.log"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke }}
         with:
           name: installer-iso-smoke
@@ -243,7 +243,7 @@ jobs:
           # operator who accepted the defaults would.
           bash infra/installer/install-test.sh "$(ls dist/*.iso | head -1)"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.install }}
         with:
           name: installer-iso-install-test

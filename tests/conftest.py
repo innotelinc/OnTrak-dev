@@ -18,9 +18,9 @@ SCENARIOS_DIR = REPO_ROOT / "scenarios"
 
 GUAC_KEY = "0123456789abcdef0123456789abcdef"
 
-try:  # FastAPI + httpx are optional at runtime; skip cleanly if absent
+try:  # FastAPI's TestClient, and the httpx2 transport it needs, are dev-only
     from fastapi.testclient import TestClient
-except ImportError:  # pragma: no cover
+except (ImportError, RuntimeError):  # pragma: no cover - starlette raises RuntimeError without httpx2
     TestClient = None
 
 
@@ -119,7 +119,7 @@ def app_env(settings, store, incus):
     callback would (see `login`).
     """
     if TestClient is None:  # pragma: no cover - exercised only without fastapi
-        pytest.skip("fastapi/httpx not installed")
+        pytest.skip("fastapi/httpx2 not installed")
     from ontrak.portal.app import create_app
 
     store.upsert_user("alice", "student", "Alice A")
@@ -217,7 +217,7 @@ def sso_env(settings, store, incus):
     in — and it is the one a sign-in has to survive.
     """
     if TestClient is None:  # pragma: no cover - exercised only without fastapi
-        pytest.skip("fastapi/httpx not installed")
+        pytest.skip("fastapi/httpx2 not installed")
     from ontrak.portal.app import create_app
 
     settings.portal.oidc_issuer = OIDC_ISSUER

@@ -21,9 +21,9 @@ permissions:
 jobs:
   structure:
     name: Repository structure
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Conformant structure
         run: |
@@ -62,9 +62,9 @@ jobs:
 
   landing:
     name: Landing page sanity
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Landing sanity
         run: |
@@ -82,15 +82,15 @@ jobs:
 
   python:
     name: Python control plane
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -147,9 +147,9 @@ jobs:
 
   guest-scripts:
     name: Guest PowerShell parses
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Parse every scenario script
         shell: pwsh
@@ -185,9 +185,9 @@ jobs:
 
   shell-and-compose:
     name: Shell and compose
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Shell syntax
         run: |
@@ -247,9 +247,9 @@ jobs:
 
   docker:
     name: Container image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build the portal image
         run: docker build -t ontrak:ci .
@@ -331,9 +331,9 @@ jobs:
   # a class fails here instead — with the real gateway image, doing the real signing.
   console-gateway:
     name: Console gateway key
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build the portal image
         run: docker build -t ontrak:ci .
