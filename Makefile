@@ -222,8 +222,24 @@ templates: ## Build every scenario template (or one: make templates ARGS="sw-app
 pool: ## Show warm-pool depth and template readiness
 	$(PY) -m ontrak pool status
 
+prewarm: ## Warm the pool (make prewarm ARGS="--scenario sw-app-crash --count 3")
+	@# Same trap as `templates`, and the same code path underneath it: prewarming a
+	@# Windows VM waits for the guest transport, so the password has to be in the
+	@# environment or the wait fails every time. A prewarm that *fails* also leaves
+	@# the machine it was warming behind, running and unclaimed — see
+	@# docs/operations.md, "A prewarm that fails leaves its machine in the pool".
+	@test -f .env || { echo "no .env — run 'make secrets' first (or 'make setup')"; exit 2; }
+	@guest="$$(sed -n 's/^ONTRAK_GUEST__PASSWORD=//p' .env | head -1)"; \
+	test -n "$$guest" || { echo "ONTRAK_GUEST__PASSWORD is empty in .env — run 'make secrets'"; exit 2; }; \
+	ONTRAK_GUEST__PASSWORD="$$guest" $(PY) -m ontrak pool prewarm $(ARGS)
+
 reap: ## Expire sessions, recycle idle ones, refill pools
-	$(PY) -m ontrak reap
+	@# `reap` refills pools, which warms Windows VMs, so it needs the guest password
+	@# for exactly the reason `make prewarm` and `make templates` do.
+	@test -f .env || { echo "no .env — run 'make secrets' first (or 'make setup')"; exit 2; }
+	@guest="$$(sed -n 's/^ONTRAK_GUEST__PASSWORD=//p' .env | head -1)"; \
+	test -n "$$guest" || { echo "ONTRAK_GUEST__PASSWORD is empty in .env — run 'make secrets'"; exit 2; }; \
+	ONTRAK_GUEST__PASSWORD="$$guest" $(PY) -m ontrak reap
 
 serve: ## Run the student portal on the host (no containers)
 	$(PY) -m ontrak serve
