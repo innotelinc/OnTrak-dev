@@ -18,9 +18,9 @@ REMOTE_OVERLAY := -f docker-compose.yml -f docker-compose.remote.yml
 
 .PHONY: help setup secrets check doctor validate test lint demo \
         catalog catalog-validate media-status media-fetch generate schedule \
-        golden golden-import templates pool reap demo-serve host-image landing \
+        golden golden-import golden-pull templates pool reap demo-serve host-image landing \
         installer-iso installer-iso-smoke installer-iso-test \
-        build up up-remote down logs ps exec check-compose setup-log \
+        build publish-image up up-remote down logs ps exec check-compose setup-log \
         docker-demo docker-shell provision provision-plan console-recreate \
         local-auth local-auth-down
 
@@ -62,6 +62,14 @@ installer-iso-test: ## Install a machine from the built ISO in QEMU, then check 
 
 build: ## Build the portal image
 	$(COMPOSE) build
+
+publish-image: ## Build and push the portal image to GHCR (make publish-image PUSH=0 to skip the push)
+	@# The image a range host pulls instead of building, and the local twin of
+	@# .github/workflows/publish.yml: the same serving stage and the same tags, with
+	@# the version read from ontrak/__init__.py rather than typed. VERSION, REGISTRY
+	@# and PUSH are read from the environment, as they are by the family's
+	@# scripts/publish-images.sh.
+	bash scripts/publish-image.sh
 
 ## ---- Trust: DNS + TLS + edge through Cerulean ---------------------------
 # This repo owns no nameserver and no CA. Cerulean does (docs/stack.md), and
@@ -203,6 +211,14 @@ golden-import: ## Publish a golden image built on another host (make golden-impo
 	@# golden image on a nested host". The disk is checked before it is published,
 	@# because a half-applied image imports fine and then hangs every template.
 	bash infra/import-golden-image.sh $(ARGS)
+
+golden-pull: ## Pull a published golden image (make golden-pull ARGS=win11e-2026-10-06)
+	@# The half of the pair that was missing: the image could be published by a
+	@# script, but pulling one was a two-step command in docs/operations.md that every
+	@# host retyped. With no ARGS it takes the newest published tag, so a host set up
+	@# on any other day does not ask for today's date and get `unauthorized`.
+	@# Importing stays a separate step: that is the one that verifies the disk.
+	bash infra/pull-golden-image.sh $(ARGS)
 
 ## ---- Range operations ---------------------------------------------------
 

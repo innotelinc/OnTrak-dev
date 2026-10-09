@@ -277,6 +277,15 @@ not exist or may require 'docker login'`, which reads as a credentials problem a
 is not one. If you *do* ship the image — `ONTRAK_IMAGE=ghcr.io/you/ontrak:tag` —
 set `ONTRAK_PULL_POLICY=missing` (or `always`) so a deploy can fetch it.
 
+**The image is published.** `.github/workflows/publish.yml` pushes
+`ghcr.io/<owner>/ontrak` when a release is published, or when an operator runs it by
+hand; `scripts/publish-image.sh` is its local twin — the same `runtime` stage, the same
+tags (`<version>`, `<major>.<minor>`, `latest`, `sha-<commit>`), the version read from
+`ontrak/__init__.py` — so a range host can be pointed at a published version instead of
+building one, which is what `ONTRAK_IMAGE` above is for. Publishing needs no long-lived
+secret: the repository's own `GITHUB_TOKEN` with `packages: write` writes GHCR in its
+own namespace.
+
 ## Troubleshooting
 
 **`/admin` shows "Hypervisor reads failed".** The panel is telling you exactly

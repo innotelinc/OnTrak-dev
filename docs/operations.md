@@ -435,11 +435,14 @@ it — publishing one hands that to every host at once. It then pushes the two f
 the build wrote (`incus.tar.xz` and `disk.qcow2`) as a single OCI artifact, using
 `oras`, which it needs on `PATH` or pointed at with `ONTRAK_ORAS`.
 
-A pulling host needs one step more than an importing one:
+A pulling host needs one step more than an importing one, and `make golden-pull` is
+that step: it asks the registry what it holds, takes the newest `win11e-*` tag unless
+one is named, and refuses a destination that is not empty — an older `disk.qcow2`
+sitting there is a complete Windows install too, so the import would adopt the wrong
+one without complaint. `ONTRAK_GOLDEN_FORCE=1` overwrites what is there.
 
 ```bash
-oras login ghcr.io -u <user>                    # a new package is private by default
-oras pull ghcr.io/innotelinc/ontrak-golden:win11e-2026-10-06 -o ./golden-export
+make golden-pull                                # newest image → ./golden-export
 make golden-import ARGS=./golden-export         # verifies the disk again, then imports
 make templates                                  # templates are built where they run
 ```
@@ -447,10 +450,18 @@ make templates                                  # templates are built where they
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `ONTRAK_GOLDEN_REPOSITORY` | `ghcr.io/innotelinc/ontrak-golden` | any OCI registry `oras` can reach |
-| `ONTRAK_GOLDEN_TAG` | `win11e-<today>` | one tag per build, so an older image stays pullable |
+| `ONTRAK_GOLDEN_TAG` | the newest `win11e-*` tag | name one to pin it: `make golden-pull ARGS=win11e-2026-10-09` |
+| `ONTRAK_GOLDEN_PULL_DIR` | `golden-export` | where the layers land |
+| `ONTRAK_GOLDEN_FORCE` | unset | pull into a destination that already holds files |
 | `ONTRAK_GOLDEN_TOKEN` / `ONTRAK_GOLDEN_USER` | `gh auth token` / `gh api user` | leave both unset to use an existing `oras login` |
 | `ONTRAK_ORAS` | `oras` on `PATH` | oras is not vendored with this repo |
 | `ONTRAK_SKIP_VERIFY` | unset | publishes an unverified disk; only for a deliberate call |
+
+The publish side and the pull side are one script each (`infra/publish-golden-image.sh`,
+`infra/pull-golden-image.sh`) for the reason the templates' pair exists: a command an
+operator types by hand from a document is a command that will be typed slightly wrong,
+and the way it goes wrong here is a directory holding last week's disk beside this
+week's metadata.
 
 Two things about what lands in the registry. A GHCR package starts **private**, which
 is the right default for an image built from a Windows evaluation ISO — making it
@@ -578,7 +589,7 @@ rather than published.
 | `ontrak pool status` says a warm machine is ready, but the training credentials are rejected when a session claims it, while its sibling — cloned from the same snapshot at the same moment — logs in fine | the machine was left by a prewarm whose readiness wait failed on the empty-password trap above, and the wait does not stop there: it retries every 5 s for its whole budget (84 logons in the 7-minute run measured here), which trips the guest's own lockout policy and locks `student` out. `net accounts` on the built image reports Windows' defaults — **threshold 10, duration 10 minutes, observation window 10** — nothing in this repository sets them, and network logons count. Reproduced on a warm machine, in this order: the correct password was accepted; twelve rejected logons later it was refused; eight minutes after the flood it was *still* refused; and after eleven minutes with no attempt at all it was accepted again. The middle two are the trap for whoever is diagnosing this — **a refused logon counts even when the password is right**, so testing the machine re-arms its own lockout and it looks permanently broken. That is why the sibling answered and this one did not: its wait had ended earlier, so its lockout had already cleared | A machine in this state needs no repair, only ten quiet minutes — do not sit there testing it, or you will keep it locked. Clear it out rather than diagnosing it in place: `ontrak pool drain --scenario <id>`, then `make prewarm ARGS="--scenario <id> --count <n>"`. The reason to fix the *cause* is that the failed prewarm leaves these machines behind and `ontrak pool status` counts them as ready |
 | `ontrak template build` gets all the way through the scenario setup, the guest shuts down, and the build then fails with `incus snapshot create tpl-<id> clean failed (1): … dd if=…/root.img of=…/virtual-machines-snapshots/… bs=16M conv=nocreat,sparse iflag=direct oflag=direct: exit status 1 (dd: IO error: Invalid input)` | the host's filesystem cannot do **O_DIRECT reads**, which is how Incus's `dir` driver copies a VM disk to snapshot it. It is not the image and not free space: measured on such a host, `dd if=<a file written seconds ago> of=/dev/null bs=16M iflag=direct` returns `Invalid input` while buffered reads and O_DIRECT *writes* both succeed. Only virtual machines are affected — a container snapshot (every Linux scenario) uses rsync and works | Give the range a pool whose driver snapshots without copying the disk: `ONTRAK_STORAGE_DRIVER=btrfs` (or `zfs`), per `infra/bootstrap-host.sh`, with the template and pool built there. `incus image copy <alias> <pool>: --alias <alias>` moves the golden image onto it |
 | `infra/publish-golden-image.sh` (or `scripts/verify-golden-image.py` on its own) fails with `qemu-img: error while writing at byte …: No space left on device` on a host with tens of GiB free | the verifier reads a qcow2 by converting it to a raw copy inside `TMPDIR`, and the copy is the size of the disk's *data* (~17 GiB for the 32 GiB Windows image). Where `/tmp` is a tmpfs — 12 GiB here, a fraction of RAM, and not counted in the `df` of `/` you were just looking at — it cannot fit, and the failure names the wrong filesystem | point `TMPDIR` at one with room: `TMPDIR=/var/tmp infra/publish-golden-image.sh ./golden-export`. Same for `make golden-import`, which verifies the disk it is about to adopt |
-| `infra/publish-golden-image.sh` runs for hours, then ends `PUBLISH EXIT=1`, and the tag it was publishing is not in `oras repo tags` | the upload died on the wire, not in the script: `oras` reports `http2: Transport: cannot retry err [stream error: stream ID 17; REFUSED_STREAM; received from peer] after Request.Body was written`. Observed here ~11 GiB into the 12.9 GiB `disk.qcow2` — the whole disk is one blob, `oras` cannot resume a blob upload, and this host's link moves ~1.7 MB/s, so the push takes about two hours and anything that drops it loses everything sent so far | Do not assume a publish landed: `oras repo tags ghcr.io/innotelinc/ontrak-golden` is the check, and the registry keeps the previous tag when a run dies this way. The local export is intact, so re-run the publish — with `ONTRAK_SKIP_VERIFY=1` once the disk verify has already passed, since that step wants a ~17 GiB raw copy in `TMPDIR`. On a link this slow, expect to retry, or publish from a host that can finish the blob in one go |
+| `infra/publish-golden-image.sh` runs for hours, then ends `PUBLISH EXIT=1`, and the tag it was publishing is not in `oras repo tags` | the upload died on the wire, not in the script: `oras` reports `http2: Transport: cannot retry err [stream error: stream ID 17; REFUSED_STREAM; received from peer] after Request.Body was written`. Observed here ~11 GiB into the 12.9 GiB `disk.qcow2` — the whole disk is one blob, `oras` cannot resume a blob upload, and this host's link moves ~1.7 MB/s, so the push takes about two hours and anything that drops it loses everything sent so far | Do not assume a publish landed: `oras repo tags ghcr.io/innotelinc/ontrak-golden` is the check, and the registry keeps the previous tag when a run dies this way. The fix that fits a link like this one is to send fewer bytes rather than to retry: `qemu-img convert -c -O qcow2` over the export's disk is still a qcow2, so the layer's name, its media type and `incus image import` are all unchanged, and it is smaller by more than half — **12.05 GiB to 6.29 GiB measured on this host**, which put the push inside the window the two 12.9 GB attempts never reached. Verify the compressed disk first (`scripts/verify-golden-image.py`, which decompresses to raw and so needs ~12 GiB in `TMPDIR` and a `TMPDIR` on a real filesystem), then publish with `ONTRAK_SKIP_VERIFY=1` because that same file has just been read. Publishing from a host that can finish 12.9 GB in one go needs none of this |
 | `pywinrm` errors with 401 | wrong training password, or the account is not a local admin | Compare with `guest.password`; the image sets `LocalAccountTokenFilterPolicy=1` so elevation should work |
 | Template build fails with "never obtained an address" | wrong bridge or DHCP range exhausted | `incus network get ontrak0 ipv4.dhcp.ranges`; widen the range for large classes |
 | Template build fails with "did not report ONTRAK-SETUP-OK" | the setup script threw | The error includes the output tail; run the VM manually and execute `setup.ps1` to see the full error |

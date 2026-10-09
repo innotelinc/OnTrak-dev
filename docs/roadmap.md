@@ -42,20 +42,49 @@ planned. Anything in the last two sections is a statement of intent, not a featu
   that silently half-works is the expensive kind of broken, and CI now runs ShellCheck at
   warning severity over every shell file — the first-run setup runs as root on someone
   else's machine before anything else does.
+- The published image. `.github/workflows/publish.yml` pushes `ghcr.io/<owner>/ontrak`
+  when a release is published, or when an operator runs it by hand, and
+  `scripts/publish-image.sh` is its local twin — the same `runtime` stage and the same
+  tags (`<version>`, `<major>.<minor>`, `latest`, `sha-<commit>`), with the version read
+  from `ontrak/__init__.py` rather than typed. Publishing needs no long-lived secret,
+  which is the decision that item left open: the repository's own `GITHUB_TOKEN` with
+  `packages: write` writes GHCR in its own namespace. The by-hand path has been run
+  here — `0.1.0`, `0.1`, `latest` and `sha-c1a767998668` are in the registry — so a range
+  host can be pointed at a published image instead of building one:
+  `ONTRAK_IMAGE=ghcr.io/innotelinc/ontrak:<version>` with `ONTRAK_PULL_POLICY=missing`,
+  per [docker.md](docker.md) beside the stack's own `pull_policy: never`.
+- The publish and pull scripts for the golden image are one pair, like the templates'.
+  `infra/pull-golden-image.sh` (`make golden-pull`) takes the newest `win11e-*` tag
+  unless one is named, refuses a destination that already holds an export — an older
+  `disk.qcow2` there is a complete Windows install too, so the import would adopt the
+  wrong one — and stops before the import, which stays `make golden-import`.
 
 ## Built, but not proven on real hardware
 
-These paths are reviewed and tested only up to the Incus boundary; they need a lab host:
+These paths are reviewed and tested only up to the Incus boundary. A lab host has since
+been built and run, so the parts it exercised are marked walked — and the ones it did not
+are still exactly as unproven as they were:
 
-- Unattended Windows image builds (the `incus-windows` and `answer-file` builders) and the
-  golden-image pipeline.
-- WinRM and Incus-agent guest transports against real Windows guests.
-- Windows, Server and Office template builds and their scenario fault injection.
+- **Walked: unattended Windows image builds** (the `incus-windows` and `answer-file`
+  builders) and the golden-image pipeline. `make golden` on a nested AMD host, with Hyper-V
+  switched off, completed under KVM in about 35 minutes — Windows Setup, boot from disk,
+  specialize, `post-install.ps1` over WinRM, publish — with no `KVM: entry failed`/`SMM=1`
+  in the build VM's qemu log. The image it produced boots, logs in as the training account
+  and answers both 3389 and 5985 ([operations.md](operations.md) has the host probe).
+- **Walked: WinRM against real Windows guests** — every template build, the pool's
+  readiness wait and a student session reach the guest over it. The **Incus-agent**
+  transport still is not, and deliberately: it is opt-in, and the golden image clears
+  `requirements.cdrom_agent` so an instance without the agent disk can start.
+- **Walked: Windows template builds and their fault injection** — 21 templates across the
+  catalogue, each carrying its `clean` snapshot, on a `btrfs` pool; a session is handed a
+  warm machine in about two seconds. **Server and Office** builds still are not.
 - Guacamole deployment, console embedding and TLS in front of the gateway.
 - ZFS/btrfs clone performance at class scale (the capacity model in
-  [operations.md](operations.md) is arithmetic, not a benchmark).
+  [operations.md](operations.md) is arithmetic, not a benchmark). The pool and the
+  templates do run on `btrfs` now, which is what makes the clone cost the model assumes a
+  real one rather than a `dir` driver's full copy.
 
-The first-class fix is the same for all of them: `make check`, build one template, walk one
+The first-class fix is the same for the rest: `make check`, build one template, walk one
 scenario end to end, then size the pool.
 
 ## Next
@@ -76,9 +105,6 @@ scenario end to end, then size the pool.
    for the operator. Deliberately last: it is easy to add and hard to remove.
 6. **Scenario packs.** Versioned, signed bundles so a course can pin its scenario set and
    ship it to another range without copying the whole repository.
-7. **Publish the image.** The Dockerfile is unbuilt-on-push today: the CI job builds it, but
-   nothing pushes it to a registry. A tagged `ghcr.io/innotelinc/ontrak` would make a range
-   host a `docker pull` instead of a build (and needs the registry credentials decision).
 
 ## Out of scope
 

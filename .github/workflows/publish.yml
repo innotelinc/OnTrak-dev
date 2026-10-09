@@ -1,0 +1,96 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# publish.yml — the one workflow that writes to a registry.
+#
+# `ci.yml` builds the image on every push so it cannot rot; this publishes it,
+# and only when a release is published — or when an operator asks by hand. The
+# two are kept apart for the reason the family's own `publish.yml` gives: a push
+# to main must never produce a tag a host could pull without someone having
+# decided to release.
+#
+# The image lands at:
+#
+#   ghcr.io/<owner>/ontrak
+#
+# which is the name docs/docker.md already spells out (`ONTRAK_IMAGE`), so a host
+# that would rather pull than build needs two variables and no checkout:
+#
+#   ONTRAK_IMAGE=ghcr.io/innotelinc/ontrak:1.2.3
+#   ONTRAK_PULL_POLICY=missing     # the stack declares pull_policy: never by default
+#
+# **The credentials are the repository's own, and that is the decision this file
+# records** (the roadmap left it open). `secrets.GITHUB_TOKEN` with the
+# `packages: write` permission below is enough for GHCR in the repository's own
+# namespace, so publishing needs no long-lived PAT to rotate and no extra secret
+# to provision. A token that cannot write the package is what produces a 403 that
+# reads like a platform problem; if this repository is ever published to a
+# different owner's namespace, that is the moment to add a PAT secret here rather
+# than to widen this token.
+#
+# A release tags the image `latest`, the version and its `major.minor`; a manual
+# run tags it by commit, so it can prove the pipeline without minting a version
+# anyone might deploy. `scripts/publish-image.sh` mirrors this file for an
+# operator pushing by hand, so a release cut here and an image pushed there are
+# the same artifact under the same name.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: Publish image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # The only elevated permission any workflow here asks for, and it is what
+  # pushing to GHCR needs.
+  packages: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  # Never cancel mid-push: a half-uploaded tag is worse than a slow one.
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to GHCR
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Sign in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Work out the tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/ontrak
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=tag
+            type=sha,format=long
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Named rather than left to "whichever FROM is last": the builder stage
+          # resolves the dependencies and the runtime stage is the one that ships,
+          # and an unnamed target would publish whichever the next Dockerfile edit
+          # leaves at the bottom.
+          target: runtime
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=ontrak
+          cache-to: type=gha,scope=ontrak,mode=max
