@@ -166,7 +166,7 @@ three ways to reach a hypervisor, and the volume that holds the results.
 make doctor                                                    # host healthy? (incus, secrets, console gateway key)
 
 .venv/bin/ontrak scenario validate                           # catalogue healthy?
-.venv/bin/ontrak template build --all                        # after any scenario edit
+make templates                                               # after any scenario edit
 .venv/bin/ontrak pool prewarm --scenario net-dns-failure --count 30
 make serve          # terminal 1: portal
 make reap           # terminal 2: expiry + pool top-ups
@@ -278,6 +278,41 @@ measured there:
 None of those is a setting to get right: the host cannot do the one thing the guest
 needs, and every attempt to ask for less of it produces a guest that is not the one
 this range teaches on. What works is not asking the host to virtualise at all.
+
+#### When the host can virtualise SMM after all
+
+The table above is what a host does when nested virtualisation is not *exposed* to
+it. That is a setting on the hypervisor underneath — Hyper-V on the host, or
+`nested=1` on a KVM one — not a property of the hardware, of QEMU or of this range.
+Turn it on and the same machine runs the guest on KVM.
+
+Measured on a VMware guest on a Ryzen (8 cores, 22 GiB RAM) after its outer
+hypervisor was told to expose virtualisation:
+
+* `infra/qemu-accel.sh --check` still decides **`tcg`**: `systemd-detect-virt`
+  reports `vmware` and the CPU is still `AuthenticAMD`, which is exactly what the
+  rule reads, and neither of those changed. The *detection is not evidence* that
+  the limit is still there.
+* A UEFI guest with Secure Boot and SMM on, under `accel = "kvm"`, boots and runs:
+
+  ```bash
+  sudo incus init images:ubuntu/24.04/cloud smm-probe --vm -c security.secureboot=true
+  printf '[machine]\nsmm = "on"\n' | sudo incus config set smm-probe raw.qemu.conf -
+  sudo incus start smm-probe && sudo incus exec smm-probe -- uptime
+  ```
+
+  A host that still cannot do it fails *immediately* instead — the instance is in
+  `ERROR` seconds after the start and its qemu log ends `KVM: entry failed,
+  hardware error 0xffffffff` with `SMM=1`. So the probe costs a minute, not an hour.
+* `make golden` then ran to completion in **about 35 minutes** with
+  `ONTRAK_QEMU_ACCEL=kvm` — Windows Setup, the specialize pass,
+  `post-install.ps1` over WinRM, and the publish — where the emulated path costs
+  hours.
+
+So on a host where it has been enabled, set `ONTRAK_QEMU_ACCEL=kvm` for the build
+**and for the range**. Templates and student sessions ask the same helper when they
+are created, and without it this host still hands them the emulated CPU — the
+sessions then look like a slow host rather than a misconfigured one.
 
 #### The emulated fallback
 
@@ -511,6 +546,9 @@ rather than published.
 | `ontrak template build` fails with `incus list --format=json failed (124): timed out after 120s`, even though `ONTRAK_INCUS__OPERATION_TIMEOUT_SECONDS` is raised | the plumbing used to fall back to its own 120 s default for reads, ignoring the operator's setting. `incus list` is not a cheap read on a busy host: it reports each instance's state, agent status and address, so it blocks for minutes on a VM that is still booting | Fixed — the configured timeout is the ceiling for every call. If you are on an older build, raise the default in `incus.py` or pacify the host first |
 | `make golden` fails after a long install with `Error: Failed to begin transaction: sql: database is closed`, then `incus ls` fails with `Error: Image not found`, and the build VM is gone | something on the host restarted `incus` while the build was running, and `tools/pack.sh` deleted its build VM from an EXIT trap on the way out. An unattended `apt` upgrade is enough: `unattended-upgrades` and `apt-daily*.timer` are enabled by default, `ovmf`/`qemu-efi-*` upgrades are routine, and the restart kills a running build | Current builds keep the VM (`ontrak-winpack-build`) so the installed disk survives, and a new run stops rather than overwrite it — recover with [Recovering a build VM that was kept](#recovering-a-build-vm-that-was-kept) instead of rebuilding. The script does not *disable* the host's update timers, but it does name the ones it finds at the start of a build and tell you to stop them; they return at the next boot, which is deliberate — a build should not leave a range's security updates off |
 | `make golden` gets all the way through the install and the export, then fails with `tar: rootfs.img: Wrote only 512 of 10240 bytes`, and the published image has vanished from `incus image list` | `tools/pack.sh` extracts the disk back out of the export tarball when it is finished, and the build host's **root** filesystem ran out of space doing it — not the Incus pool, which is usually a separate disk. `pack.sh`'s `EXIT` trap then removes the image it had just published, so what is left is a complete export tarball and a truncated `rootfs.img` | Recover, do not rebuild — the tarball *is* the image, and the install is finished. See [Recovering a build VM that was kept](#recovering-a-build-vm-that-was-kept) |
+| A clone of the golden image — `ontrak template build`, or a session — goes to `ERROR`, and `incus` logs `Unpack failed … tar: rootfs.img: Wrote only 512 of 10240 bytes` at the moment it was created | the host's **root** filesystem filled while Incus unpacked the image's disk, which on the `dir` driver is a full-size copy: a Windows 11 golden image is 6 GiB compressed but each instance made from it holds about 13 GiB (the disk itself is 32 GiB apparent). It does not have to be the pool that fills — the build's own `output/` (13 GiB), the ISOs (6 GiB) and a couple of clones are enough to take a 100 GiB root to zero, and the next clone then fails to unpack | Free space before building or cloning, and check `df` rather than the pool: `incus list`, `/var/lib/incus/images`, `/var/lib/incus/storage-pools` and the checkout's `build/` are what to weigh. The build's export (``build/incus-windows/output/<image>``) and the intermediate image it imports (`win11e`) are both recoverable — the published alias is the one to keep |
+| `ontrak template build` fails with "`<vm>` at `<ip>` never became reachable over the winrm transport", the guest has an address, **both 3389 and 5985 are open**, and the same image logs in fine by hand | the range's `guest.password` is empty: it reads `os.environ`, while `.env` is a *compose* env file only `docker compose` parses. Every logon it makes is then with an empty password, and WinRM answers `the specified credentials were rejected by the server` — which the readiness wait reports as the transport never coming up. Running the CLI by hand does this; `make golden` reads the password out of `.env` with `sed`, and `make templates` now does the same | `make templates` instead of the bare CLI, or export it yourself: `ONTRAK_GUEST__PASSWORD="$(sed -n 's/^ONTRAK_GUEST__PASSWORD=//p' .env | head -1)" .venv/bin/ontrak template build <id> --force`. Sourcing `.env` is not an equivalent fix — it is a compose file, so a value with a space splits (see the `golden` recipe) |
+| `ontrak template build` gets all the way through the scenario setup, the guest shuts down, and the build then fails with `incus snapshot create tpl-<id> clean failed (1): … dd if=…/root.img of=…/virtual-machines-snapshots/… bs=16M conv=nocreat,sparse iflag=direct oflag=direct: exit status 1 (dd: IO error: Invalid input)` | the host's filesystem cannot do **O_DIRECT reads**, which is how Incus's `dir` driver copies a VM disk to snapshot it. It is not the image and not free space: measured on such a host, `dd if=<a file written seconds ago> of=/dev/null bs=16M iflag=direct` returns `Invalid input` while buffered reads and O_DIRECT *writes* both succeed. Only virtual machines are affected — a container snapshot (every Linux scenario) uses rsync and works | Give the range a pool whose driver snapshots without copying the disk: `ONTRAK_STORAGE_DRIVER=btrfs` (or `zfs`), per `infra/bootstrap-host.sh`, with the template and pool built there. `incus image copy <alias> <pool>: --alias <alias>` moves the golden image onto it |
 | `pywinrm` errors with 401 | wrong training password, or the account is not a local admin | Compare with `guest.password`; the image sets `LocalAccountTokenFilterPolicy=1` so elevation should work |
 | Template build fails with "never obtained an address" | wrong bridge or DHCP range exhausted | `incus network get ontrak0 ipv4.dhcp.ranges`; widen the range for large classes |
 | Template build fails with "did not report ONTRAK-SETUP-OK" | the setup script threw | The error includes the output tail; run the VM manually and execute `setup.ps1` to see the full error |

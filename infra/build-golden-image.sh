@@ -524,6 +524,25 @@ fi
 
 log "publishing as $IMAGE_ALIAS"
 incus --project "$PROJECT" publish "$BUILD_VM" --alias "$IMAGE_ALIAS"
+
+# Clear the property again, on *this* alias, because this is the one the range
+# clones from and `incus publish` has just put it back.
+#
+# The clear above is on the image that was imported, and on its own it is not
+# enough. Measured on a host that had just built this image: create a build VM from
+# an image whose `requirements.cdrom_agent` is cleared, publish that VM, and the
+# resulting image carries `requirements.cdrom_agent: true` again. Nothing in this
+# range attaches an `agent:config` disk -- OnTrak drives Windows over WinRM -- and
+# Incus enforces the requirement at *start*, so without this line the build reports
+# success and every clone of it fails with
+#
+#     Error: This virtual machine image requires an agent:config disk be added
+#
+# which is every Windows template and every Windows session. Same command and same
+# reason as the clear above; infra/import-golden-image.sh does the same for an image
+# it imports from somewhere else.
+incus --project "$PROJECT" image set-property "$IMAGE_ALIAS" requirements.cdrom_agent=""
+
 incus --project "$PROJECT" delete "$BUILD_VM" --force
 
 cat <<EOF

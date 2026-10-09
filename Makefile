@@ -206,8 +206,18 @@ golden-import: ## Publish a golden image built on another host (make golden-impo
 
 ## ---- Range operations ---------------------------------------------------
 
-templates: ## Build every scenario template (boot, inject fault, snapshot as "clean")
-	$(PY) -m ontrak template build --all
+templates: ## Build every scenario template (or one: make templates ARGS="sw-app-crash --force")
+	@# The guest password has to be in the environment for this, exactly as it does
+	@# for `make golden`, and for the same reason: the range reads os.environ, while
+	@# .env is a *compose* env file that only `docker compose` parses. Without it
+	@# every template build stops at "never became reachable over the winrm
+	@# transport" — the WinRM logon is made with an empty password and rejected —
+	@# with a Windows guest that is up and answering both ports. Read with sed
+	@# rather than sourced; `make golden` has the account of why.
+	@test -f .env || { echo "no .env — run 'make secrets' first (or 'make setup')"; exit 2; }
+	@guest="$$(sed -n 's/^ONTRAK_GUEST__PASSWORD=//p' .env | head -1)"; \
+	test -n "$$guest" || { echo "ONTRAK_GUEST__PASSWORD is empty in .env — run 'make secrets'"; exit 2; }; \
+	ONTRAK_GUEST__PASSWORD="$$guest" $(PY) -m ontrak template build $(if $(ARGS),$(ARGS),--all)
 
 pool: ## Show warm-pool depth and template readiness
 	$(PY) -m ontrak pool status
