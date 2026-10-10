@@ -100,6 +100,16 @@ services:
       # port too, and so does a browser on another machine. 127.0.0.1 is not
       # enough — the issuer URL has to be one address that both can use, which is
       # the host's own, and a container calling that address needs it published.
+      #
+      # Published on loopback as well, and that is not belt-and-braces: `setup.sh`
+      # waits on `127.0.0.1:<port>/-/health/ready/` and `provision.py` calls the API
+      # there, so a deployment that pins `AUTHENTIK_BIND_ADDR` to its own address —
+      # which is what a range keeping itself on its LAN does — used to be refused
+      # by both, wait out the readiness deadline and give up before provisioning
+      # the application it was run for. A bare `"9000:9000"` (the 0.0.0.0 default)
+      # also opens this port on the docker bridges, which nothing off this host can
+      # dial; loopback and the host's own address is the pair that has callers.
+      - "127.0.0.1:${AUTHENTIK_HTTP_PORT:-9000}:9000"
       - "${AUTHENTIK_BIND_ADDR:-0.0.0.0}:${AUTHENTIK_HTTP_PORT:-9000}:9000"
     volumes:
       # uploads (avatars, icons) and the templates directory the image expects.
