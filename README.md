@@ -116,6 +116,7 @@ credential is baked into the image. [docs/installer.md](docs/installer.md).
 | [docs/operations.md](docs/operations.md) | Host sizing, capacity maths, warm pools, schedules, media management, backups and troubleshooting |
 | [docs/docker.md](docs/docker.md) | The container stack: what runs in Docker and what cannot, the three ways to reach a hypervisor, volumes, secrets, upgrades |
 | [docs/installer.md](docs/installer.md) | The bootable installer ISO: building it, the one screen it stops on, what first boot provisions, and its settings |
+| [docs/dev-server.md](docs/dev-server.md) | Moving the development server to a new machine: what is on GitHub, and the one script that puts it back |
 | [docs/roadmap.md](docs/roadmap.md) | What is verified, what is planned, and what is explicitly out of scope |
 
 ## Repo layout
