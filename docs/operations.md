@@ -98,7 +98,40 @@ disk ≈ templates (20-30 GiB × scenarios, powered off)
      + recordings, if guac.recording is on
 ```
 
-`ontrak doctor` warns when the pool driver is `dir`.
+`ontrak doctor` warns when the pool driver is `dir`, and reports the pool's **free
+space** — read from Incus (`/1.0/storage-pools/<pool>/resources`), so a portal in a
+container sees the host's numbers. It warns at 90% used and fails at 97%, because
+the pool is not the only thing on that filesystem.
+
+#### Put the pool on its own disk
+
+This is the one mistake here that takes a working range down without an error
+message anywhere useful. A pool on the host's **root** filesystem — a subdirectory
+of `/var/lib/incus`, or a loop-file pool, which is the same thing with a mount in
+front of it — shares that filesystem with the Incus database, the container runtime
+and the portal's own state. When it fills, PostgreSQL panics with `No space left on
+device` and enters recovery, and every symptom arrives through the portal instead:
+the sign-in page says the provider is unreachable and the range reports
+"sign-in is not set up". Measured on a host laid out this way: 45 GiB of 45 GiB
+pool in a loop file, 0 bytes free on `/`, and a portal that was healthy six minutes
+earlier.
+
+So give the pool a device of its own, sized for the templates and the class:
+
+* a dedicated disk or LVM logical volume, **not** a loop file and not a directory
+  on `/`, formatted `zfs` or `btrfs` (`incus storage create lab btrfs
+  source=/dev/<vg>/<lv>`);
+* big enough for the apparent size of what you hold, which CoW makes hard to guess:
+a pool holding the golden image plus one template per Windows scenario can report
+`incus storage info` at 35 GiB used while `du` on its disks shows **215 GiB** — the
+clones share the image's extents. Copying those instances to another pool
+materialises them, which is why an in-place "move the pool" needs more space than
+the pool says it uses;
+* and pointed at by both `ONTRAK_INCUS__STORAGE_POOL` and the profile the machines
+are cloned into (`incus profile device get <profile> root pool`). When those two
+disagree, `doctor` names both rather than reporting the space of a pool nothing is
+using — which is how a pool with 10 GiB left went unnoticed while the configured
+one sat empty.
 
 ## Scheduled prewarm and teardown
 
@@ -291,9 +324,10 @@ for the whole class: a cluster does not make a cold Windows boot faster.
 `make golden` boots a Windows 11 virtual machine and lets Windows Setup install
 into it. Windows 11 Setup requires Secure Boot, and on a UEFI guest Secure Boot
 means **SMM**. A host whose own virtualisation is *nested* may not be able to
-virtualise SMM at all. The host that does this is nested AMD KVM — a range host
-that is itself a guest, e.g. **WSL2/Hyper-V on a Ryzen**. Four configurations were
-measured there:
+virtualise SMM at all. The host this was measured on is a **nested AMD** one — a
+range host that is itself a guest, e.g. **WSL2/Hyper-V on a Ryzen**. Nesting alone
+does not decide it, and this range used to assume it did; see "When the host can
+virtualise SMM after all" below. Four configurations were measured on *that* host:
 
 | Configuration | Result |
 | --- | --- |
@@ -313,13 +347,18 @@ it. That is a setting on the hypervisor underneath — Hyper-V on the host, or
 `nested=1` on a KVM one — not a property of the hardware, of QEMU or of this range.
 Turn it on and the same machine runs the guest on KVM.
 
+This is also where the range's own nested-AMD rule went. It moved **every** nested
+AMD host to the emulator on sight, generalised from the WSL2/Hyper-V measurement
+above, and that generalisation is wrong: the accelerator decision now reads one
+thing, whether this host's `/dev/kvm` answers (`ontrak/qemu.py`), and `virt` and
+`vendor` are reported to the operator rather than decided on.
+
 Measured on a VMware guest on a Ryzen (8 cores, 22 GiB RAM) after its outer
 hypervisor was told to expose virtualisation:
 
-* `infra/qemu-accel.sh --check` still decides **`tcg`**: `systemd-detect-virt`
-  reports `vmware` and the CPU is still `AuthenticAMD`, which is exactly what the
-  rule reads, and neither of those changed. The *detection is not evidence* that
-  the limit is still there.
+* `infra/qemu-accel.sh --accel` now decides **`kvm`** — the same host the old rule
+  read as `tcg`, because `systemd-detect-virt` returns `vmware` and the CPU is
+  still `AuthenticAMD`. Detection is not evidence about the limit; the probe is.
 * A UEFI guest with Secure Boot and SMM on, under `accel = "kvm"`, boots and runs:
 
   ```bash
@@ -331,15 +370,20 @@ hypervisor was told to expose virtualisation:
   A host that still cannot do it fails *immediately* instead — the instance is in
   `ERROR` seconds after the start and its qemu log ends `KVM: entry failed,
   hardware error 0xffffffff` with `SMM=1`. So the probe costs a minute, not an hour.
-* `make golden` then ran to completion in **about 35 minutes** with
-  `ONTRAK_QEMU_ACCEL=kvm` — Windows Setup, the specialize pass,
-  `post-install.ps1` over WinRM, and the publish — where the emulated path costs
-  hours.
+* `make golden` then ran to completion in **about 35 minutes** — Windows Setup, the
+  specialize pass, `post-install.ps1` over WinRM, and the publish — where the
+  emulated path costs hours.
+* A Windows guest from the golden image ran on `accel = "kvm"` and answered WinRM
+  four minutes after it was started, which is what a student's session looks like.
 
-So on a host where it has been enabled, set `ONTRAK_QEMU_ACCEL=kvm` for the build
-**and for the range**. Templates and student sessions ask the same helper when they
-are created, and without it this host still hands them the emulated CPU — the
-sessions then look like a slow host rather than a misconfigured one.
+**There is nothing to set on a host like this.** The build and the range both ask
+`infra/qemu-accel.sh`, which asks `ontrak/qemu.py`, which asks `/dev/kvm` — one
+decision, in one place, so a template and the sessions cloned from it cannot
+disagree about the accelerator. A host whose KVM genuinely cannot virtualise SMM
+is the exception, and it is named rather than guessed: set `ONTRAK_QEMU_ACCEL=tcg`
+for the build and for the range, and the guests fall back to the emulator. The
+signature above — `KVM: entry failed` with `SMM=1`, seconds after the start — is
+how that host is recognised.
 
 #### The emulated fallback
 
@@ -577,8 +621,8 @@ rather than published.
 | A Windows guest has an address and answers ARP, but every port times out with **no RST** — 5985, 3389, 445 and 135 alike — and its qemu log stays empty | Windows Firewall is dropping everything inbound, which is what it does on a network profile it treats as **Public**: the image's WinRM rules are only active on Domain and Private. It is not the SMM fault — that one leaves `KVM: entry failed, hardware error 0xffffffff` and `SMM=1` in the qemu log and puts the instance in `ERROR` — and it is not the network, because ARP resolving proves the path. The guest is running; nothing can reach it | Fixed in the *install*, so that no network is needed for it: `infra/incus-windows-pack.sh` adds a declarative firewall group that activates the Windows Remote Management rules on every profile in the autounattend, and `infra/windows/golden-local/main.ps1` — which the build puts on the unattended ISO as `local/main.ps1`, where upstream's `OEM/main.ps1` dot-sources it — runs `Enable-PSRemoting -SkipNetworkProfileCheck` and explicit 5985/3389 rules for `-Profile Any` at first logon, which also guarantees the *listener* exists. `scripts/tests/test_unattend_winrm.py` and `scripts/tests/test_golden_local.py` keep both applying. **An image built before that fix carries this fault**, and nothing on the range can repair it: OnTrak's own repair is `post-install.ps1`, which runs `Enable-PSRemoting -SkipNetworkProfileCheck` but is applied *over WinRM* — the lock is on the door with the key behind it. Rebuild the image (`make golden`, or on a host that needs the emulated CPU see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host)), then re-import or re-publish it. **Do not** put the listener half back into the autounattend as a `RunSynchronousCommand`: an over-long `Path` does not fail the command, it invalidates the whole answer file, and Windows Setup then blocks the install in the `specialize` pass with nothing in the qemu log and a guest that never stops — `infra/incus-windows-pack.sh` has the measured error and `scripts/tests/test_unattend_winrm.py` bounds the length |
 | `make golden` reports success but every Windows template then hangs at the firmware boot prompt, and `ontrak doctor` still says the golden image is present | the ISO install was OOM-killed and the half-applied disk was published as the image. Incus gives a VM disk the host write cache by default, so applying the ~7 GiB Windows image is charged to the container's memory cgroup; on a 16 GiB range host the kernel kills qemu part-way through the apply. The pinned builder (`tools/click.py`) then only waits for `incus ls` to report STOPPED — it cannot tell that kill from the clean sysprep shutdown it expects — and `pack.sh` publishes the truncated disk anyway | `infra/build-golden-image.sh` now sets the build disk to `io.cache=none` and bounds the guest RAM (`ONTRAK_GOLDEN_CPUS`/`ONTRAK_GOLDEN_MEMORY`), which removes the pressure that caused the kill. Re-run `make golden`. To check a suspect image, inspect its ESP: a formatted-but-empty ESP (no `EFI/Microsoft/Boot/bootmgfw.efi`) means the apply never finished |
 | `make golden` gets all the way through the install and then fails part-way through publishing, and from that point every `incus` command fails with `Failed to begin transaction: no available cowsql leader server found` or `context deadline exceeded` | `incus publish` tars the build disk's *apparent* size into the image — holes are not skipped — and the image store shares a dataset with Incus's own cowsql database, so a long enough copy starves the database's leader election and takes the daemon's DB with it. The bigger the build disk, the worse it gets: a 60 GiB disk copied with `--compression none` ran for fourteen minutes before wedging the DB, and a 29 GiB one ran fifteen | Size the build disk small — that is the lever this script has, and it is already set (`ONTRAK_GOLDEN_DISK`, default 32 GiB). Note that the pinned builder publishes with `--compression none` on purpose: its export step extracts the disk from a plain `.tar`, and `incus image export` writes `<fingerprint>.tar.gz` when the image is gzipped, which that step cannot read. If the DB is already wedged, `systemctl restart incus` clears it — the installed disk survives, so recover rather than rebuild: publish that instance instead of re-running the 30-60 minute install |
-| `make golden` stops immediately with `ONTRAK_GOLDEN_REQUIRE_KVM=1, and this host cannot give the guest KVM` | that variable was set, and this host is itself a guest on an AMD CPU (e.g. WSL2/Hyper-V on a Ryzen), whose nested SVM cannot virtualise SMM — Windows 11 Setup needs it | Leave it unset and let QEMU emulate the CPU (see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host)); it is several times slower but it finishes. Or build on a host where KVM is **not** nested and copy the image in |
-| `make golden` fails seconds in on a nested AMD host, and the build VM's qemu log ends `KVM: entry failed, hardware error 0xffffffff` with `SMM=1` | the build VM was started on KVM anyway, which means the accelerator hook never reached it. The fallback is applied by a hook this range writes into the checkout's `tools/pack.sh`, and the build warns when it cannot — `could not add the accelerator hook to tools/pack.sh` | Look for that warning in the build's own output and re-read `infra/incus-windows-pack.sh` against the pinned checkout. On a build VM that was kept, set it by hand: `infra/qemu-accel.sh --apply <vm> default`. Disabling Secure Boot and the TPM is not the fix — OVMF uses SMM for its runtime services regardless, and `-machine smm=off` hangs the guest instead |
+| `make golden` stops immediately with `ONTRAK_GOLDEN_REQUIRE_KVM=1, and this host cannot give the guest KVM` | that variable was set, and this host's KVM cannot virtualise SMM — Windows 11 Setup needs it. Measured on WSL2/Hyper-V on a Ryzen; nesting on its own does not decide it, and a VMware guest on the same CPU can do it | Leave it unset and let QEMU emulate the CPU (see [Building the golden image on a nested host](#building-the-golden-image-on-a-nested-host)); it is several times slower but it finishes. Or build on a host whose KVM can virtualise SMM and copy the image in |
+| `make golden` fails seconds in on a host whose KVM cannot virtualise SMM, and the build VM's qemu log ends `KVM: entry failed, hardware error 0xffffffff` with `SMM=1` | the build VM was started on KVM anyway, which means the accelerator hook never reached it. The fallback is applied by a hook this range writes into the checkout's `tools/pack.sh`, and the build warns when it cannot — `could not add the accelerator hook to tools/pack.sh` | Look for that warning in the build's own output and re-read `infra/incus-windows-pack.sh` against the pinned checkout. On a build VM that was kept, set it by hand: `infra/qemu-accel.sh --apply <vm> default`. Disabling Secure Boot and the TPM is not the fix — OVMF uses SMM for its runtime services regardless, and `-machine smm=off` hangs the guest instead |
 | A Windows instance goes to `ERROR` a few seconds after it starts — `ontrak template build` on the golden image, or a student session — and its qemu log ends `KVM: entry failed, hardware error 0xffffffff` with `SMM=1` | the same host limit as the row above, except that it stops *running* the image and not only building it. Templates are set up for the emulated fallback when they are built and the clones inherit it, so an instance that still fails was either made before that existed or did not go through `ontrak` | Confirm what this host decided with `infra/qemu-accel.sh --check`, then set it on the instance: `infra/qemu-accel.sh --apply <instance>` — stopped, because Incus refuses `raw.qemu.conf` on a running VM — and rebuild the template so future clones carry it. This row is about the CPU only: `security.secureboot=false` does not help, and the guest still has to be Windows |
 | `ontrak template build` (or `session start`) fails with `Error: This virtual machine image requires an agent:config disk be added` | the golden image carries `requirements.cdrom_agent=true`. incus-windows' `tools/pack.sh` stamps it on every image it publishes, `incus publish` copies image properties, and the property also travels in the export's `metadata.yaml` — so it arrives with the image and cannot be dropped by importing without the flag. It means "every instance from this image must have an `agent:config` disk", and Incus enforces it at *start*, where nothing in `ontrak/` attaches one: OnTrak drives Windows over WinRM, which needs no agent config | Fixed — `infra/import-golden-image.sh` and `infra/build-golden-image.sh` clear the property as they adopt the image. To repair one that is already imported: `incus --project ontrak image set-property ontrak-win-base requirements.cdrom_agent=""` (`incus image unset-property` panics with a nil pointer in Incus 7.5.1). Operators using the opt-in `incus-exec` driver want the requirement back, with the disk: `incus config device add <vm> incusagent disk source=agent:config` |
 | `ontrak template build` fails with `incus list --format=json failed (124): timed out after 120s`, even though `ONTRAK_INCUS__OPERATION_TIMEOUT_SECONDS` is raised | the plumbing used to fall back to its own 120 s default for reads, ignoring the operator's setting. `incus list` is not a cheap read on a busy host: it reports each instance's state, agent status and address, so it blocks for minutes on a VM that is still booting | Fixed — the configured timeout is the ceiling for every call. If you are on an older build, raise the default in `incus.py` or pacify the host first |
@@ -738,9 +782,11 @@ Three details that are not obvious:
   compliance for training VMs is the operator's responsibility.
 * **Hosts:** nothing in this stack needs a commercial hypervisor; Linux + KVM +
   Incus covers it. The Zabbly repository is the upstream Incus channel. One caveat,
-  for the golden image only: the host's KVM must not be nested if its CPU is AMD —
-  see [Building the golden image on a nested
-  host](#building-the-golden-image-on-a-nested-host).
+  for the golden image only: the host's KVM must be able to virtualise SMM, which
+  is a property of the virtualisation underneath rather than of the hardware. A
+  nested AMD host was measured *without* it (WSL2/Hyper-V on a Ryzen) and one was
+  measured *with* it (VMware on a Ryzen) — see [Building the golden image on a
+  nested host](#building-the-golden-image-on-a-nested-host).
 * **Third-party build tool:** `antifob/incus-windows` automates the unattended
   Windows install. Pin a commit (`ONTRAK_INCUS_WINDOWS_REF`) — it is a build-time
   dependency, not a runtime one, and its interface changes between versions. Four of
