@@ -224,6 +224,25 @@ class IncusClient:
         except IncusError:
             return {}
 
+    def pool_resources(self, pool: str | None = None) -> dict:
+        """One pool's real capacity: ``space`` and ``inodes``, in bytes and counts.
+
+        Asked of the raw API, because no CLI spelling of it is JSON — `storage info`
+        prints a paragraph and takes no `--format` (see storage_info), and `storage
+        list` does not carry usage at all. It is worth the extra call: this is the
+        request that answers "how close is this host to running out", which is the
+        failure that takes Incus, the portal's database and its containers down
+        together — and it answers it from anywhere, including a container that
+        cannot see the host's own filesystem.
+
+        Raises rather than swallowing, like the reads around it: an unreadable pool
+        is a finding `doctor` prints, not an empty dict it mistakes for "0 used".
+        """
+        name = pool or self.incus.storage_pool
+        # `query` refuses --project, so the flag is dropped and the project, if it
+        # ever needs to travel, belongs in the path.
+        return self.run_json(["query", f"/1.0/storage-pools/{name}/resources"], project=False) or {}
+
     def storage_info(self, pool: str | None = None) -> dict:
         """One pool's record, from the list the CLI *can* render as JSON.
 

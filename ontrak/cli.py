@@ -135,6 +135,29 @@ class Context:
 # ---------------------------------------------------------------------------
 # doctor
 # ---------------------------------------------------------------------------
+def pool_verdict(used: int, total: int) -> tuple[str, str]:
+    """How close a storage pool is to full, and the sentence to print about it.
+
+    Pure, so the thresholds are testable without a host: ``ok`` below 90% used,
+    ``warn`` at 90, ``full`` at 97. The last one is not decoration — at 100% the
+    pool's filesystem fills and takes the portal's database with it, which is how a
+    range goes from "working" to "sign-in is not set up" with nothing in between.
+    """
+    if not total:
+        return "unknown", "space not reported by Incus"
+    percent = used / total * 100
+    gib = 2**30
+    line = (
+        f"{used / gib:.1f} GiB used of {total / gib:.1f} GiB "
+        f"({percent:.0f}%, {(total - used) / gib:.1f} GiB free)"
+    )
+    if percent >= 97:
+        return "full", line + " — at 100% the portal's database goes with it"
+    if percent >= 90:
+        return "warn", line
+    return "ok", line
+
+
 def cmd_doctor(args) -> int:
     ctx = Context(args.config)
     settings = ctx.settings
@@ -232,6 +255,33 @@ def cmd_doctor(args) -> int:
         except IncusError as exc:
             _say(WARN, f"could not list profiles: {exc}")
 
+        # ── capacity ──
+        # The one resource that fails in a way nothing else on this page notices: a
+        # full filesystem takes Incus, the portal's database and its containers down
+        # together, and the machines that were working simply stop. Read from Incus
+        # rather than from this machine's disks, so a portal container gets the
+        # host's answer. Both pools are named when they differ, because the pool this
+        # range is *configured* to use and the one its machines are actually cloned
+        # into are not always the same, and it is the second that fills up.
+        pools: dict[str, str] = {settings.incus.storage_pool: "the pool this range is configured to use"}
+        try:
+            asked = client.run(["profile", "device", "get", settings.incus.profile, "root", "pool"])
+            cloning_pool = (asked.stdout or "").strip()
+        except IncusError:
+            cloning_pool = ""
+        if cloning_pool and cloning_pool != settings.incus.storage_pool:
+            pools[cloning_pool] = "the pool its machines are cloned into"
+        for name, whose in pools.items():
+            try:
+                space = client.pool_resources(name).get("space") or {}
+            except IncusError as exc:
+                _say(WARN, f"pool {name!r} ({whose}): could not read its space ({exc})")
+                continue
+            state, line = pool_verdict(int(space.get("used") or 0), int(space.get("total") or 0))
+            _say({"ok": OK, "warn": WARN, "full": FAIL, "unknown": INFO}[state], f"pool {name!r} ({whose}): {line}")
+            if state == "full":
+                failures += 1
+
     print()
     print("Images and templates")
     if IncusClient.available():
@@ -306,20 +356,39 @@ def cmd_doctor(args) -> int:
     _say(OK if accelerator["accel"] == qemu.KVM else WARN, accelerator["reason"])
     firmware_code = accelerator["ovmf"].get("code")
     firmware_vars = accelerator["ovmf"].get("vars")
-    if firmware_code and firmware_vars:
-        _say(INFO, f"OVMF {firmware_code} and {firmware_vars}")
-    else:
-        _say(WARN, "no OVMF CODE/VARS image found — a Windows guest needs one to boot")
-    if accelerator["missing_packages"]:
-        note = "missing for a Windows guest: " + " ".join(accelerator["missing_packages"])
-        # Blocking only where something builds a Windows guest: a Linux-only range
-        # runs perfectly well on a host without OVMF, and calling it a failure
-        # there reads as a broken range when nothing is broken.
-        if ctx.manager is None or ctx.manager.golden_image_required():
-            _say(FAIL, note)
-            failures += 1
+    # The accelerator is decided here and is about the guests; the packages and the
+    # firmware below are read off *this* filesystem, and where the portal is a
+    # container this is not the machine the guests run on. Reporting its package list
+    # as a blocking failure is how a range that works gets called broken — so the
+    # only honest answer from there is to name the machine that owns the question.
+    if accelerator["checked_here"]:
+        if firmware_code and firmware_vars:
+            _say(INFO, f"OVMF {firmware_code} and {firmware_vars}")
         else:
-            _say(INFO, note + " (nothing on this range builds a Windows guest)")
+            _say(WARN, "no OVMF CODE/VARS image found — a Windows guest needs one to boot")
+        if accelerator["missing_packages"]:
+            note = "missing for a Windows guest: " + " ".join(accelerator["missing_packages"])
+            # Blocking only where something builds a Windows guest: a Linux-only range
+            # runs perfectly well on a host without OVMF, and calling it a failure
+            # there reads as a broken range when nothing is broken.
+            if ctx.manager is None or ctx.manager.golden_image_required():
+                _say(FAIL, note)
+                failures += 1
+            else:
+                _say(INFO, note + " (nothing on this range builds a Windows guest)")
+    else:
+        # What the portal can establish about the host it drives: incusd reports the
+        # QEMU it found, and it is incusd that runs the guests. It cannot list a
+        # package set — nothing can, from here — so this is evidence, not a verdict,
+        # and the verdict stays with the machine that owns the packages.
+        environment = (client.server_info().get("environment") or {}) if client is not None else {}
+        drivers = environment.get("driver_version") or environment.get("driver") or ""
+        _say(INFO, "the guests run on the Incus host, not here" + (f" (its drivers: {drivers})" if drivers else ""))
+        _say(
+            INFO,
+            "packages and firmware to check there: infra/qemu-accel.sh --check "
+            f"— not from this container (missing here: {' '.join(accelerator['missing_packages']) or 'none'})",
+        )
 
     print()
     print("Console gateway")

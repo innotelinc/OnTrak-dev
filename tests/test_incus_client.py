@@ -91,7 +91,15 @@ if head == "query":
     if asks_for_format(rest):
         die("unknown flag: --format")
     path = rest[0] if rest else ""
-    sys.stdout.write(json.dumps(ROOT if path == "/1.0" else {}) + "\n")
+    if path == "/1.0":
+        sys.stdout.write(json.dumps(ROOT) + "\n")
+        raise SystemExit(0)
+    if path.endswith("/resources") and "storage-pools/" in path:
+        # What a pool reports about itself, which is how `doctor` sees a host's
+        # filesystem filling up without being able to see the host's filesystem.
+        sys.stdout.write(json.dumps({"space": {"total": 100, "used": 91}, "inodes": {}}) + "\n")
+        raise SystemExit(0)
+    sys.stdout.write(json.dumps({}) + "\n")
     raise SystemExit(0)
 
 if head == "image" and rest[:1] == ["info"]:
@@ -236,6 +244,21 @@ def test_storage_info_defaults_to_the_configured_pool(client, settings):
 
 def test_storage_info_says_nothing_about_a_pool_that_is_not_there(client):
     assert client.storage_info("nosuchpool") == {}
+
+
+def test_pool_resources_reports_the_space_a_pool_has(client):
+    """`doctor` reads a host's capacity this way, from wherever it runs.
+
+    `storage info` prints a paragraph and takes no --format, and `storage list`
+    carries no usage at all, so this is the only JSON answer to "how full is the
+    pool" — the one that decides whether the portal's database survives the night.
+    """
+    assert client.pool_resources("default")["space"] == {"total": 100, "used": 91}
+
+
+def test_pool_resources_asks_the_raw_api_without_a_project(client):
+    """`query` refuses --project; the stand-in enforces that, so a flag fails here."""
+    assert client.pool_resources()["space"]["used"] == 91
 
 
 # --------------------------------------------------------------------------- #
