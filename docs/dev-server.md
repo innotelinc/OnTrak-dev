@@ -20,7 +20,9 @@ sudo infra/restore-dev-server.sh --with-lab --with-templates
 | the family application (`src/`, `prisma/`, `ontrak-{tix,sentinel,sync,genie,portal}/`) | `innotelinc/OnTrak`, branch `main` | `git clone` |
 | the lab, its host bootstrap, the installer | `innotelinc/OnTrak-dev`, branch `main` | `git clone` |
 | the product images | `ghcr.io/innotelinc/ontrak-{training,training-migrate,tix,tix-migrate,sentinel,sentinel-migrate,genie,portal,sync-api,sync-web}` | `docker pull`, then re-tagged into the names the family stack expects |
+| the lab portal image | `ghcr.io/innotelinc/ontrak` | `docker pull`, tagged `ontrak:local` (what the lab's compose names it) |
 | the Windows golden image | `ghcr.io/innotelinc/ontrak-golden` (`win11e-*`) | `make golden-pull` (`--with-templates`) |
+| the scenario templates | `ghcr.io/innotelinc/ontrak-template` | `infra/import-templates.sh` (`--with-templates`) |
 | the range-host installer | the `installer-24.04.5` release on OnTrak-dev (three ISOs, split into parts under GitHub's asset cap) | `./reassemble.sh <tier>` from the release |
 
 The images are published by `make publish-images` on the OnTrak side, which tags
@@ -53,9 +55,12 @@ plane still starts and demo mode still runs.
 - **The installer ISO.** It is built where it is needed (`make installer-iso`,
   `make installer-iso-tiers`), and the published release exists for a range host
   that has no internet yet. See [installer.md](installer.md).
-- **The scenario templates.** They are snapshots built where they will run, so they
-  are built on the new host (`make templates`) rather than shipped. The golden image
-  they are built from *is* pulled.
+- **Nothing else.** The templates are pulled rather than built (`infra/import-templates.sh`),
+  because building one means booting a Windows guest once per scenario and importing
+  one is minutes; `make templates` is the fallback for whatever the registry does not
+  hold, and is what a host without `incus` or `oras` gets. Importing takes the
+  `clean` snapshot and the QEMU accelerator again on the host that will run it, so a
+  pulled template is a template here, not a copy of one.
 
 ## After it finishes
 

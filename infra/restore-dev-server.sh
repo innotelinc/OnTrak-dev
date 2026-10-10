@@ -50,6 +50,8 @@
 #   ONTRAK_ROOT        where the two checkouts go        (default /srv/ontrak)
 #   ONTRAK_REGISTRY    image registry                    (default ghcr.io/innotelinc)
 #   ONTRAK_IMAGE_TAG   tag to pull                       (default sha-<commit>, else latest)
+#   ONTRAK_LAB_IMAGE   the lab portal image name         (default ontrak)
+#   ONTRAK_GOLDEN_PULL_DIR  where `make golden-pull` lands it (default golden-export)
 #   ONTRAK_LAN_IP      this host's LAN address           (default: detected)
 #   GH_TOKEN           a token for a private package     (default: `gh auth token`)
 #
@@ -66,6 +68,7 @@ FAMILY_REF="${ONTRAK_REF:-main}"
 LAB_REF="${ONTRAK_DEV_REF:-main}"
 REGISTRY="${ONTRAK_REGISTRY:-ghcr.io/innotelinc}"
 TAG="${ONTRAK_IMAGE_TAG:-}"
+LAB_IMAGE_NAME="${ONTRAK_LAB_IMAGE:-ontrak}"
 
 WITH_LAB=0
 WITH_TEMPLATES=0
@@ -104,7 +107,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 # `--check` is a dry run that also reports what it found: it is the question "would
-# this work here?", and the only honest answer is one that changes nothing.
+# this work here?", and the only honest answer is one that changes nothing. It
+# still reads: the commit both checkouts are on, whether a tag is published with
+# that commit's name, and what this host's LAN address is.
 if [[ $CHECK = 1 ]]; then DRY=1; fi
 
 # One wrapper decides whether a step happens, so `--dry-run` shows the same script
@@ -381,13 +386,41 @@ IMAGES=(
   "ontrak-sync-web|innotel/ontrak-sync-web:main"
 )
 
+# A new GHCR package is private by default, so the pull needs a token even for a
+# repository anyone can read. `gh auth token` is the same sign-in `make
+# publish-images` uses in the other direction, and the same fallback: an operator
+# who has already run `docker login` is left alone.
+registry_login() {
+  [[ "$REGISTRY" = ghcr.io* ]] || return 0
+  command -v gh >/dev/null 2>&1 || return 0
+  if [[ $DRY = 1 ]]; then
+    printf '    would sign in to %s with the gh token, if the packages are private\n' "${REGISTRY%%/*}"
+    return 0
+  fi
+  # A manifest read costs nothing and answers the only question that matters: can
+  # this host see the package? An operator who has already run `docker login` is
+  # left alone, which is also what the publish scripts in both repositories do.
+  if docker manifest inspect "$REGISTRY/ontrak-training:$TAG" >/dev/null 2>&1; then
+    return 0
+  fi
+  local token user
+  token="${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}"
+  user="$(gh api user --jq .login 2>/dev/null || true)"
+  [[ -n "$token" ]] || { warn "no gh token: if the packages are private the pulls below will fail"; return 0; }
+  [[ -n "$user" ]] || user="token"
+  log "signing in to ${REGISTRY%%/*} as $user"
+  printf '%s' "$token" | docker login "${REGISTRY%%/*}" -u "$user" --password-stdin >/dev/null \
+    || warn "docker login failed — private packages will not pull"
+}
+
 if [[ $CHECK = 1 ]]; then
   for image in "${IMAGES[@]}"; do
     printf '    %-46s <- %s/%s:%s\n' "${image#*|}" "$REGISTRY" "${image%%|*}" "$TAG"
   done
   log "run without --check to pull and tag these"
 else
-  if [[ $CHECK = 0 ]] && ! docker manifest inspect "$REGISTRY/ontrak-training:latest" >/dev/null 2>&1; then
+  registry_login
+  if [[ $DRY = 0 ]] && ! docker manifest inspect "$REGISTRY/ontrak-training:latest" >/dev/null 2>&1; then
     warn "the registry is not answering for $REGISTRY (a private package needs a token: gh auth token | docker login ghcr.io -u <user> --password-stdin)"
   fi
   PULLED=0
@@ -433,16 +466,55 @@ else
   # The lab's portal is SSO-only, so its IdP comes up first: `setup.sh` is
   # idempotent, keeps its own .env, and is the step that registers the OIDC client.
   run_in "$LAB_DIR" ./deploy/authentik/setup.sh
+
+  # The lab's own image is published too (`make publish-image`), so the control
+  # plane can start from it rather than compile a 2.6 GiB image on the new host.
+  # The lab's compose names it `ontrak:local` and declares `pull_policy: never`,
+  # so the registry image is pulled under its own name and tagged into that one.
+  LAB_IMAGE="${REGISTRY}/${LAB_IMAGE_NAME:-ontrak}:$TAG"
+  LAB_PULLED=0
+  if [[ $DRY = 1 ]]; then
+    printf '    would pull %s and tag it ontrak:local\n' "$LAB_IMAGE"
+  elif docker pull "$LAB_IMAGE" >/dev/null 2>&1; then
+    docker tag "$LAB_IMAGE" ontrak:local
+    LAB_PULLED=1
+    log "lab image: $LAB_IMAGE -> ontrak:local"
+  else
+    warn "$LAB_IMAGE is not published at $TAG: the lab image is built here"
+  fi
+
   # Then the control plane itself: lab-setup writes the shared secrets and
   # bootstraps Incus on this host, and the portal and console start when it exits.
-  run_in "$LAB_DIR" docker compose up -d --build
+  if [[ $LAB_PULLED = 1 ]]; then
+    run_in "$LAB_DIR" docker compose up -d
+  else
+    run_in "$LAB_DIR" docker compose up -d --build
+  fi
 
   if [[ $WITH_TEMPLATES = 1 ]]; then
     # The golden image is the expensive half and the one worth pulling: it is
     # published so a new host adopts it rather than rebuilding Windows.
     run_in "$LAB_DIR" make golden-pull
-    run_in "$LAB_DIR" make golden-import
-    run_in "$LAB_DIR" make templates
+    run_in "$LAB_DIR" make golden-import ARGS=golden-export
+
+    # The templates themselves are published as well
+    # (`infra/publish-templates.sh` -> ghcr.io/innotelinc/ontrak-template), and
+    # importing them is minutes against the hours each Windows template costs to
+    # build — so the pull is the step here and `make templates` is the fallback for
+    # whatever the registry does not hold. Importing needs the two tools the lab's
+    # own bootstrap does not install: this says which one is missing instead of
+    # leaving it to fail inside `incus`.
+    if [[ $DRY = 1 ]]; then
+      printf '    would run: (cd %s && infra/import-templates.sh || make templates)\n' "$LAB_DIR"
+    elif ! command -v incus >/dev/null 2>&1 || ! command -v "${ONTRAK_ORAS:-oras}" >/dev/null 2>&1; then
+      warn "no incus or no oras on this host, so the published templates cannot be imported — building them instead"
+      run_in "$LAB_DIR" make templates
+    elif ( cd "$LAB_DIR" && infra/import-templates.sh ); then
+      log "published templates imported"
+    else
+      warn "the registry did not hold every template — building the rest (this is the slow half)"
+      run_in "$LAB_DIR" make templates
+    fi
   fi
 fi
 
