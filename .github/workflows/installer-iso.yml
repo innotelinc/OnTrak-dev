@@ -156,14 +156,28 @@ jobs:
           grep -q 'shutdown: reboot'                "$RUNNER_TEMP/user-data" \
             || { echo "::error::the install does not reboot into the provisioned system"; exit 1; }
 
-          # Both menu entries — the standard and the HWE kernel — must request the
-          # autoinstall, or choosing the other one silently installs interactively.
-          patched="$(grep -c 'ds=nocloud;s=/cdrom/nocloud/' "$RUNNER_TEMP/grub.cfg")"
-          echo "boot entries requesting the autoinstall: $patched"
-          [ "$patched" -ge 2 ] \
-            || { echo "::error::a /casper boot entry does not request the autoinstall"; exit 1; }
+          # Both destinations — the unattended install on the machine's disk, and the one
+          # that stops on storage so the target can be chosen (a USB stick) — for both
+          # kernels. The datasource argument has to be **quoted**: grub ends an argument at
+          # `;`, so an unquoted one reaches the kernel as `autoinstall ds=nocloud`, which
+          # finds no autoinstall, drops `console=ttyS0` with it, and reports neither. See
+          # infra/installer/patch-grub.py for the measurement.
+          for dir in /nocloud /nocloud-choose-disk; do
+            quoted="$(grep -c "autoinstall \"ds=nocloud;s=/cdrom$dir/\"" "$RUNNER_TEMP/grub.cfg")"
+            echo "boot entries for $dir: $quoted, quoted"
+            [ "$quoted" -ge 2 ] \
+              || { echo "::error::a /casper boot entry does not request the $dir autoinstall, quoted"; exit 1; }
+            profile="$RUNNER_TEMP/$(basename "$dir").user-data"
+            xorriso -osirrox on -indev "$iso" -extract "$dir/user-data" "$profile" >/dev/null
+            grep -q 'interactive-sections' "$profile" \
+              || { echo "::error::$dir/user-data does not keep a screen interactive"; exit 1; }
+          done
+          # The choose-disk entries boot toram: the medium being installed to can be the
+          # medium the installer is running from.
+          grep -q 'toram console=ttyS0' "$RUNNER_TEMP/grub.cfg" \
+            || { echo "::error::the choose-disk entries do not boot toram"; exit 1; }
 
-          echo 'payload: installed, enabled, and both boot entries patched'
+          echo 'payload: installed, enabled, both destinations patched and quoted'
 
       # What was built, for a human: the log, the autoinstall that shipped (with
       # the per-build password hash redacted — it is a throwaway, but a hash has

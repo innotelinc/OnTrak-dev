@@ -9,12 +9,24 @@ WHAT HAPPENS
 ------------
 
 1.  Boot the machine from this ISO (BIOS or UEFI, USB stick or virtual media).
-    The installer starts by itself.
+    The menu offers two installs, one per kernel:
+
+      Install OnTrak on this machine's disk (unattended)
+        the default; takes the largest disk. This is a bare-metal range host.
+
+      Install OnTrak on the disk you choose (USB stick, or another disk)
+        the same install, with the storage screen left up so you pick the disk.
+        This is how a USB stick becomes a portable range host: install onto the
+        stick, then boot the stick. It boots toram, so it can install onto the
+        very stick it booted from. There is no live mode — a server ISO has no
+        live session, the installer is all that boots off it.
 
 2.  It stops on one screen: identity. Choose the admin username, the hostname and
     the password, and paste an SSH public key if you want one. Everything else —
-    locale, keyboard, DHCP, LVM on the largest disk, the SSH server, security
-    updates — is already decided.
+    locale, keyboard, DHCP, LVM, the SSH server, security updates — is already
+    decided. (The "disk you choose" entry stops on storage as well, which is where
+    you choose. Give the pool a partition of its own there rather than leaving it
+    on the root filesystem: see docs/operations.md, "Put the pool on its own disk".)
 
 3.  The install runs, then the machine reboots into the new system. The first
     boot is when the rest happens, unattended:

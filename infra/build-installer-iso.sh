@@ -4,16 +4,27 @@
 #
 #   infra/build-installer-iso.sh
 #
-# The result installs Ubuntu Server 24.04 LTS on a bare machine, then turns it
-# into a range host on first boot: Incus, the ontrak0 lab bridge, the OnTrak
-# checkout and the portal stack. The operator answers exactly one screen —
-# identity (username, hostname, password, SSH key) — and nothing is baked in.
+# The result installs Ubuntu Server 24.04 LTS on a bare machine — or on a disk you
+# choose, which is how a USB stick becomes a portable range — and then turns that
+# machine into a range host on first boot: Incus, the ontrak0 lab bridge, the OnTrak
+# checkout and the portal stack. The operator answers identity (username, hostname,
+# password, SSH key), and the target disk if they asked for that; nothing is baked in.
 #
 # It is a remaster of the official Ubuntu Server live ISO:
 #
-#   * /nocloud/{user-data,meta-data}   the autoinstall (see autoinstall/)
-#   * /ontrak/…                        the first-boot payload (see firstboot/)
-#   * the boot entries get `autoinstall ds=nocloud;s=/cdrom/nocloud/`
+#   * /nocloud/{user-data,meta-data}          the `machine` autoinstall: this
+#                                             machine's disk, identity the only
+#                                             screen (see autoinstall/)
+#   * /nocloud-choose-disk/{user-data,meta-data}  the `choose-disk` autoinstall: the
+#                                             same install with the storage screen
+#                                             up, so a USB stick can be the target
+#   * /ontrak/…                               the first-boot payload (see firstboot/)
+#   * the boot entries get `autoinstall ds=nocloud;s=/cdrom/<dir>/` — one entry per
+#     profile, so the menu offers both (see infra/installer/patch-grub.py)
+#
+# The two autoinstalls are rendered from one template
+# (infra/installer/render-autoinstall.py), because everything about the install
+# except which screens stay up has to stay identical.
 #
 # xorriso is used to extract and repack, and to recreate the original boot
 # equipment (BIOS El Torito, UEFI, isohybrid MBR/GPT) so the image boots from a
@@ -180,25 +191,24 @@ log "extracting $BASE_ISO"
 xorriso_run -osirrox on -indev "$BASE_ISO" -extract / "$EXTRACT" >/dev/null
 chmod -R u+w "$EXTRACT"
 
-# autoinstall, the way the nocloud datasource expects it.
-mkdir -p "$EXTRACT/nocloud"
-cp "$INSTALLER_DIR/autoinstall/meta-data" "$EXTRACT/nocloud/meta-data"
-
+# The autoinstalls, the way the nocloud datasource expects each one: one
+# user-data/meta-data pair per profile, in the directory its boot entry will name.
+# The renderer prints the directory it wrote, and the boot entries are patched with
+# that value rather than with a second copy of the paths — a boot entry pointing at
+# a directory nothing wrote is the one way this can fail quietly.
 need python3 "renders the autoinstall template"
-python3 - "$INSTALLER_DIR/autoinstall/user-data.dist" "$EXTRACT/nocloud/user-data" \
-  "$USERNAME" "$HOSTNAME_DEFAULT" "$PASSWORD_HASH" "$RELEASE" <<'PY'
-import pathlib, sys
-template, out, username, hostname, pw_hash, release = sys.argv[1:7]
-text = pathlib.Path(template).read_text()
-for token, value in (("@USERNAME@", username), ("@HOSTNAME@", hostname),
-                     ("@PASSWORD_HASH@", pw_hash), ("@RELEASE@", release)):
-    text = text.replace(token, value)
-left = [t for t in ("@USERNAME@", "@HOSTNAME@", "@PASSWORD_HASH@", "@RELEASE@") if t in text]
-if left:
-    sys.exit(f"unsubstituted tokens in {template}: {left}")
-pathlib.Path(out).write_text(text)
-PY
-log "wrote /nocloud/user-data and /nocloud/meta-data"
+render_autoinstall() { # render_autoinstall <profile>
+  python3 "$INSTALLER_DIR/render-autoinstall.py" \
+    --profile "$1" --iso-tree "$EXTRACT" \
+    --template "$INSTALLER_DIR/autoinstall/user-data.dist" \
+    --meta-data "$INSTALLER_DIR/autoinstall/meta-data" \
+    --username "$USERNAME" --hostname "$HOSTNAME_DEFAULT" \
+    --password-hash "$PASSWORD_HASH" --release "$RELEASE" | tail -n 1
+}
+MACHINE_DIR="$(render_autoinstall machine)"
+CHOOSE_DIR="$(render_autoinstall choose-disk)"
+log "wrote $MACHINE_DIR/user-data (identity is the only screen)"
+log "wrote $CHOOSE_DIR/user-data (identity, then pick the target disk)"
 
 # The first-boot payload, straight from the repository so the ISO and the repo
 # cannot drift apart.
@@ -211,7 +221,14 @@ chmod 0755 "$EXTRACT/nocloud" "$EXTRACT/ontrak" "$EXTRACT/ontrak/firstboot.sh"
 log "wrote /ontrak (first-boot payload)"
 
 # ------------------------------------------------------------------- boot -----
-step "pointing the boot entries at the autoinstall"
+step "pointing the boot entries at the autoinstalls"
+# Every entry that loads /casper/vmlinuz is retitled to say what it does, pointed
+# at the `machine` autoinstall, and duplicated for `choose-disk`. The duplicate
+# boots `toram` too, because installing onto the stick you booted from is the
+# point of it and the medium has to be free to be erased. The original stays
+# first, so grub's default — an unattended install on this machine's disk — is
+# what an unanswered boot still does. (patch-grub.py is its own file so it can be
+# tested against a fixture; see scripts/tests/test_patch_grub.py.)
 need python3 "patches the boot menu"
 GRUB_FILES="$(cd "$EXTRACT" && find . -name 'grub.cfg' | sort)"
 [[ -n "$GRUB_FILES" ]] || die "no grub.cfg in the extracted ISO — is $BASE_ISO really the Ubuntu Server live image?"
@@ -219,34 +236,8 @@ PATCHED=0
 while IFS= read -r rel; do
   f="$EXTRACT/${rel#./}"
   if grep -q '/casper/vmlinuz' "$f"; then
-    python3 - "$f" <<'PY'
-import re, sys
-
-path = sys.argv[1]
-# console=ttyS0 as well as the default VGA console: a headless machine with a
-# serial console can then be installed and watched over it, and the smoke test
-# below has something to read.
-ARGS = "autoinstall ds=nocloud;s=/cdrom/nocloud/ console=ttyS0"
-text = open(path).read()
-added = [0]
-
-
-def patch(m):
-    # Kernel arguments go before the `---` that separates subiquity's own ones.
-    added[0] += 1
-    return f"{m.group(1)} {ARGS}"
-
-
-# The live-server menu uses `linux` (BIOS and UEFI); `linuxefi` on older media.
-# Both the standard and the HWE kernel entries are patched, so either menu choice
-# installs unattended. (`linux16 /boot/memtest…` has no /casper path, so it is
-# left alone.)
-text = re.sub(r"^(\s*linux(?:efi)?\s+/casper/[^\s]*vmlinuz)\b", patch, text, flags=re.M)
-open(path, "w").write(text)
-if not added[0]:
-    sys.exit(f"{path}: no /casper/vmlinuz boot line found")
-print(f"    patched {added[0]} boot entr{'y' if added[0] == 1 else 'ies'} in {path}")
-PY
+    python3 "$INSTALLER_DIR/patch-grub.py" "$f" \
+      --machine-dir "$MACHINE_DIR" --choose-dir "$CHOOSE_DIR"
     PATCHED=$((PATCHED + 1))
   fi
 done <<< "$GRUB_FILES"
@@ -254,8 +245,9 @@ done <<< "$GRUB_FILES"
 log "$PATCHED boot configuration(s) patched"
 
 # Keep a copy of what we shipped, so a finished ISO can be accounted for.
-cp "$EXTRACT/nocloud/user-data" "$WORK/user-data.rendered"
-chmod 0600 "$WORK/user-data.rendered"
+cp "$EXTRACT${MACHINE_DIR}/user-data" "$WORK/user-data.machine.rendered"
+cp "$EXTRACT${CHOOSE_DIR}/user-data"  "$WORK/user-data.choose-disk.rendered"
+chmod 0600 "$WORK"/user-data.*.rendered
 
 # ------------------------------------------------------------------- repack ---
 step "repacking (BIOS + UEFI + isohybrid)"
@@ -299,32 +291,70 @@ log "built $BUILT ($SIZE_H)"
 #    this tests the artefact and not the tree it was made from.
 rm -rf "$WORK/verify"
 mkdir -p "$WORK/verify"
-for f in nocloud/user-data nocloud/meta-data \
+extract_from_image() { # extract_from_image <path-on-iso> — flattened into $WORK/verify
+  local rel="${1#/}" name="${1#/}"
+  # `nocloud/user-data` becomes `nocloud.user-data`: one flat name per path, so the
+  # two datasources' user-data files do not land on top of each other.
+  name="${name//\//.}"
+  local out="$WORK/verify/$name"
+  xorriso_run -osirrox on -indev "$BUILT" -extract "/$rel" "$out" >/dev/null 2>&1 || true
+  [[ -s "$out" ]] || die "the built ISO has no readable /$rel"
+}
+for f in "$MACHINE_DIR/user-data" "$MACHINE_DIR/meta-data" \
+         "$CHOOSE_DIR/user-data" "$CHOOSE_DIR/meta-data" \
          ontrak/firstboot.sh ontrak/ontrak-firstboot.service \
          ontrak/firstboot.env.example ontrak/README.txt; do
-  out="$WORK/verify/$(basename "$f")"
-  xorriso_run -osirrox on -indev "$BUILT" -extract "/$f" "$out" >/dev/null 2>&1 || true
-  [[ -s "$out" ]] || die "the built ISO has no readable /$f"
+  extract_from_image "$f"
 done
-log "payload present: the autoinstall and the first-boot unit came back out of the image"
+log "payload present: both autoinstalls and the first-boot unit came back out of the image"
 
-# The autoinstall on the image must be the one rendered from the template — not
-# an older copy, and not with a token left in it.
-diff -q "$WORK/user-data.rendered" "$WORK/verify/user-data" >/dev/null \
-  || die "the autoinstall on the ISO differs from the rendered template"
-if grep -qE '@(USERNAME|HOSTNAME|PASSWORD_HASH|RELEASE)@' "$WORK/verify/user-data"; then
-  die "the autoinstall on the ISO still contains template tokens"
-fi
-log "the autoinstall on the ISO is byte-identical to the rendered template"
+# Both autoinstalls on the image must be the ones rendered from the template — not
+# an older copy, and not with a token left in it. The `choose-disk` one is checked
+# as hard as the default: it is the profile a USB install uses, and it is the one an
+# operator cannot fall back to a different entry for.
+check_autoinstall() { # check_autoinstall <profile> <datasource dir>
+  local profile="$1" dir="$2"
+  local rendered="$WORK/user-data.$profile.rendered"
+  local got="$WORK/verify/${dir#/}.user-data"
+  diff -q "$rendered" "$got" >/dev/null \
+    || die "the $profile autoinstall on the ISO differs from the rendered template"
+  if grep -qE '@(USERNAME|HOSTNAME|PASSWORD_HASH|RELEASE|INTERACTIVE_SECTIONS)@' "$got"; then
+    die "the $profile autoinstall on the ISO still contains template tokens"
+  fi
+  log "the $profile autoinstall on the ISO is byte-identical to the rendered template"
+}
+check_autoinstall machine "$MACHINE_DIR"
+check_autoinstall choose-disk "$CHOOSE_DIR"
 
-# 2. the boot entries carry the autoinstall
+# 2. the boot entries carry the autoinstalls, and the menu offers the choice
 xorriso_run -osirrox on -indev "$BUILT" \
   -extract /boot/grub/grub.cfg "$WORK/verify/grub.cfg" >/dev/null 2>&1 || true
 [[ -s "$WORK/verify/grub.cfg" ]] \
   || die "the built ISO has no readable /boot/grub/grub.cfg"
-grep -q 'ds=nocloud' "$WORK/verify/grub.cfg" \
-  || die "the boot entries on the built ISO do not request the autoinstall"
-log "boot entries request the autoinstall ($(grep -c 'ds=nocloud' "$WORK/verify/grub.cfg") of them)"
+for dir in "$MACHINE_DIR" "$CHOOSE_DIR"; do
+  entries="$(grep -c "ds=nocloud;s=/cdrom$dir/" "$WORK/verify/grub.cfg" || true)"
+  [[ "$entries" -ge 1 ]] \
+    || die "no boot entry on the built ISO asks for the $dir autoinstall"
+  # Quoted, because grub ends an argument at `;`: unquoted, the kernel is handed
+  # `autoinstall ds=nocloud` alone — no seed directory, no console=, and no error
+  # anywhere to say so. patch-grub.py has the measurement.
+  grep -q "autoinstall \"ds=nocloud;s=/cdrom$dir/\"" "$WORK/verify/grub.cfg" \
+    || die "the boot entry for $dir does not quote the datasource argument, so grub\n    will truncate it at the semicolon and the installer will find no autoinstall"
+  log "boot entries: $entries for $dir (datasource argument quoted)"
+done
+grep -q "Install OnTrak on this machine's disk" "$WORK/verify/grub.cfg" \
+  || die "the menu entries on the built ISO do not say they install on this machine's disk"
+grep -q 'Install OnTrak on the disk you choose' "$WORK/verify/grub.cfg" \
+  || die "the built ISO has no entry for installing onto a disk you choose (a USB stick)"
+# And the choose-disk entry has to free the medium, because the medium can be the
+# disk being installed to: without `toram` the installer would be erasing the
+# filesystem it is running from.
+CHOOSE_ENTRIES="$WORK/verify/choose-disk-entries.txt"
+grep "ds=nocloud;s=/cdrom$CHOOSE_DIR/" "$WORK/verify/grub.cfg" >"$CHOOSE_ENTRIES"
+[[ "$(grep -c 'toram' "$CHOOSE_ENTRIES" || true)" -eq "$(awk 'END {print NR}' "$CHOOSE_ENTRIES")" ]] \
+  || die "a choose-disk boot entry does not boot toram: installing onto the stick it
+    booted from would pull the ground out from under the installer"
+log "the choose-disk entries boot toram (the medium is free to be installed to)"
 
 # 3. the repack left the installer's own files alone. A remaster rewrites the
 #    whole tree, so the kernel and initrd that grub loads are compared against the
@@ -438,6 +468,17 @@ Write it to a USB stick (it boots from BIOS and UEFI):
 
   sudo dd if=$OUT of=/dev/sdX bs=4M status=progress oflag=sync
 
-Then boot the target machine from it. The installer stops once, on identity;
-after the reboot the host provisions itself — journalctl -fu ontrak-firstboot.
+Then boot the target machine from it:
+
+  1. Install OnTrak on this machine's disk (unattended)
+       wipes the machine's own disk. The installer stops on identity; after the
+       reboot the host provisions itself — journalctl -fu ontrak-firstboot.
+  2. Install OnTrak on the disk you choose (USB stick, or another disk)
+       the same install, with the storage screen up so you pick the disk. This is
+       how a USB stick becomes a portable range host: install onto the stick, then
+       boot the stick. It boots \`toram\`, so it can install onto the very stick it
+       booted from.
+
+There is no third choice — a server ISO has no live session, so the only thing
+that boots off it is the installer. See docs/installer.md.
 EOF

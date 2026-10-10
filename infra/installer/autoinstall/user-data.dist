@@ -2,21 +2,28 @@
 #
 # OnTrak installer — automation for Ubuntu Server 24.04 LTS.
 #
-# infra/build-installer-iso.sh renders this template (@USERNAME@, @HOSTNAME@,
-# @PASSWORD_HASH@ and the release name), drops it on the ISO at
-# /nocloud/user-data, and points the boot entries at it
-# (`autoinstall ds=nocloud;s=/cdrom/nocloud/`).
+# infra/installer/render-autoinstall.py renders this template into the ISO tree
+# -- once per profile -- substituting @USERNAME@, @HOSTNAME@, @PASSWORD_HASH@,
+# @RELEASE@ and @INTERACTIVE_SECTIONS@, and writing each result to the datasource
+# directory its boot entry points at (`ds=nocloud;s=/cdrom/<dir>/`).
 #
-# Design: everything is automated except identity. `interactive-sections` keeps
-# that one screen up, so the operator at the console chooses the admin username,
-# the hostname and the password, and can paste an SSH key. No credential is baked
-# into the image. Identity still carries defaults, so a boot nobody answers still
-# ends in a usable host.
+#   machine      /nocloud/              installs onto this machine's disk
+#   choose-disk  /nocloud-choose-disk/  the operator picks the target disk, which
+#                                       is how a USB stick is installed
+#
+# Design: everything is automated except the screens that are left interactive.
+# `identity` is always one of them, so the operator at the console chooses the
+# admin username, the hostname and the password, and can paste an SSH key: no
+# credential is baked into an image that gets copied around. Identity still
+# carries defaults, so a boot nobody answers still ends in a usable host.
 autoinstall:
   version: 1
 
-  interactive-sections:
-    - identity
+  # identity in both profiles; storage in `choose-disk` only, where the target
+  # disk is the operator's decision and the installer's. See
+  # render-autoinstall.py for which profile carries which, and why they are
+  # profiles of one template rather than two files that drift.
+  interactive-sections: @INTERACTIVE_SECTIONS@
 
   # Defaults for the interactive identity screen. Whatever the operator types
   # wins; these are what an unattended boot falls back to.
@@ -62,6 +69,11 @@ autoinstall:
 
   # LVM on the largest disk: enough room for Incus's storage pool and the golden
   # image without the operator partitioning anything.
+  #
+  # In the `choose-disk` profile this is only the default the storage screen opens
+  # with: that section is interactive there, and the operator picks the disk ("Use
+  # an entire disk" on a USB stick, rather than the internal one). The installer
+  # cannot know which disk is the stick; the person at the console can.
   storage:
     layout:
       name: lvm

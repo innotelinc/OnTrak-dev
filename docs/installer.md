@@ -1,10 +1,15 @@
 # The installer ISO
 
 `infra/build-installer-iso.sh` builds a bootable image that installs Ubuntu Server
-24.04 LTS on a bare machine and leaves it as a working range host: Incus, the lab
-bridge, the OnTrak checkout and the portal stack. It is a remaster of Canonical's own
-live-server ISO — not a hand-rolled installer — so firmware support, drivers and the
-installer itself are whatever Ubuntu ships.
+24.04 LTS and leaves it as a working range host: Incus, the lab bridge, the OnTrak
+checkout and the portal stack. It is a remaster of Canonical's own live-server ISO —
+not a hand-rolled installer — so firmware support, drivers and the installer itself
+are whatever Ubuntu ships.
+
+It offers two installs, and they differ in one thing: the target disk. The default
+installs onto the machine's own disk, unattended. The second is the same install with
+the installer's storage screen left up, so you choose the disk — which is how a USB
+stick becomes a portable range host (["A portable range"](#a-portable-range-on-a-usb-stick)).
 
 ```bash
 make installer-iso                  # → dist/ontrak-installer-24.04.5-amd64.iso
@@ -20,9 +25,88 @@ credential is baked into an image that gets copied around. Everything else is
 already decided: locale, keyboard, DHCP on every NIC, LVM on the largest disk, the
 SSH server, security updates.
 
-The image is unattended apart from that screen. It boots from BIOS, UEFI, a USB
-stick and virtual media, because it carries the original El Torito, isohybrid MBR
+The image is unattended apart from that screen — and the storage screen of the second
+entry below, which is where that entry's target is chosen. It boots from BIOS, UEFI, a
+USB stick and virtual media, because it carries the original El Torito, isohybrid MBR
 and GPT boot equipment.
+
+### Which console the installer answers on
+
+Every entry carries `console=ttyS0` alongside the VGA console, so a machine with no
+display can be installed over serial. It has a consequence worth knowing before you
+stand in front of a monitor: **subiquity takes the serial console as its own when the
+kernel offers one**, so its prompts are answered there and a keyboard on the machine's
+own VGA console does not reach them. Measured on the built image: a keystroke on the
+PS/2 keyboard leaves subiquity's first screen unchanged. Reordering the `console=`
+arguments does not change it either — what triggers it is the serial console being on
+the command line at all.
+
+So:
+
+* **At a monitor or a VM's graphical console**: press `e` on the entry, delete
+  `console=ttyS0`, and boot. The installer then runs on the VGA console — which is the
+  console `install-test.sh` drives.
+* **On a machine you cannot sit at** (a rack host, or a VM with a serial console
+  attached): leave the entry alone and answer it over serial (`ipmitool sol activate`,
+  `virsh console`, or any serial terminal). Its first question is subiquity's own —
+  basic or rich mode — and `Enter` takes the default.
+
+### The menu, and what each entry does
+
+Both entries run the same autoinstall and produce the same range host. They are
+rendered from one template — `infra/installer/autoinstall/user-data.dist`, by
+`infra/installer/render-autoinstall.py` — as two profiles, because everything about the
+install except which screens stay up has to stay identical.
+
+| Menu entry | Target | Stops on | Autoinstall |
+| --- | --- | --- | --- |
+| *Install OnTrak on this machine's disk (unattended)* | the largest disk, LVM | identity | `/nocloud/` |
+| *Install OnTrak on the disk you choose (USB stick, or another disk)* | whichever disk you pick | identity, then storage | `/nocloud-choose-disk/` |
+
+The first is grub's default, so an unanswered boot is still the bare-metal install and
+nothing about that path changed. Both are offered for the standard and the HWE kernel,
+which is what the `[HWE kernel]` suffix on a title marks.
+
+`infra/installer/patch-grub.py` writes that menu into the grub.cfg Canonical ships,
+and `scripts/tests/test_patch_grub.py` runs it against the menu this base image
+actually carries — tabs, single-quoted titles, the `linux16` memory tester and the
+`if [ "$grub_platform" = "efi" ]` branch around the UEFI entries included — so a
+release that changes the shape of it fails a test rather than a machine at a console.
+
+## A portable range, on a USB stick
+
+The *disk you choose* entry is how a stick becomes a range host: write the ISO to a
+stick, boot it, install onto the stick, then boot the stick. Four things are worth
+knowing first.
+
+* **There is no live mode, and there cannot be.** A server ISO has no live session —
+the only thing that boots off it is the installer — so "run the range from the stick"
+means an installed stick, not a live one. A live overlay would be the wrong shape
+anyway: the Incus pool, the container runtime and PostgreSQL's state all want a real
+filesystem under them, which is the same reason [`operations.md`](operations.md) gives
+the pool a disk of its own.
+* **That entry installs onto the medium it booted from**, so it boots `toram`: casper
+copies the live media into RAM first, which frees the stick to be erased. It needs the
+room for that copy — this image asks for about **4 GiB of free RAM** — and it degrades
+gently rather than failing if it does not get it: the log says `Begin: Copying live_media
+to ram … Not enough free memory (…) to copy live media in ram.` and the install carries
+on from the medium. That is fine when the target is another disk, and *not* fine when the
+target is the stick it booted from, so check for that line if a self-install goes wrong.
+Installing from virtual media, or a second stick, onto the first avoids the question
+entirely. The *machine's disk* entry is not a substitute: it takes the largest disk,
+which on a laptop is the internal one.
+* **The pool still wants a device of its own.** The storage screen is where you leave
+room for it — partition the stick there and point
+`ONTRAK_INCUS__STORAGE_POOL` and the profile at the partition — and the reason is the
+measured one in
+[operations.md](operations.md#put-the-pool-on-its-own-disk): a pool on `/` takes
+PostgreSQL down with it when it fills, and the only symptom arrives through the portal
+as "sign-in is not set up".
+* **Use a USB SSD rather than a flash stick.** Templates are 20-30 GiB each and the
+pool writes through them; flash makes a build an hour and wears out. A portable range
+is also a small one — a student or two — so `dir` storage on the stick's pool
+partition is a reasonable choice where copy-on-write would matter more, per the
+capacity table in [operations.md](operations.md).
 
 After the install the machine reboots, and the first boot is when the range is
 built, from `infra/installer/firstboot/ontrak-firstboot.sh`:
@@ -101,18 +185,21 @@ the machine is built.
 
 1. Downloads (and sha256-verifies) the Ubuntu Server live ISO, cached.
 2. Extracts it with xorriso.
-3. Writes `/nocloud/user-data` and `/nocloud/meta-data` — the rendered autoinstall
-   from `infra/installer/autoinstall/`.
+3. Renders the autoinstall twice from one template — `machine` into `/nocloud/` and
+   `choose-disk` into `/nocloud-choose-disk/`, each with the `meta-data` the nocloud
+   datasource requires (`infra/installer/render-autoinstall.py`).
 4. Copies the first-boot payload to `/ontrak/`.
-5. Adds `autoinstall ds=nocloud;s=/cdrom/nocloud/ console=ttyS0` to every
-   `/casper/*vmlinuz` boot entry (the standard and HWE kernels) in the extracted
-   `grub.cfg` — the serial console alongside VGA, so a headless machine can be
-   installed and watched over serial.
+5. Retitles and duplicates every `/casper/*vmlinuz` boot entry (the standard and HWE
+   kernels) in the extracted `grub.cfg` — the serial console alongside VGA, so a
+   headless machine can be installed and watched over serial. One entry per autoinstall,
+   the `choose-disk` one also boots `toram`, and the datasource argument is **quoted**
+   (`infra/installer/patch-grub.py`, and see the troubleshooting row below for why).
 6. Repacks with xorriso, replaying the boot equipment that
    `-report_el_torito as_mkisofs` reports for the original image.
-7. Verifies the payload is on the image, that the boot entries request the
-   autoinstall, and that an El Torito catalogue and an isohybrid MBR/GPT are
-   present.
+7. Verifies the payload is on the image — **both** autoinstalls, byte-for-byte against
+   the rendered templates — that every boot entry asks for the datasource that was
+   actually written to the image (and that the `choose-disk` ones boot `toram`), and
+   that an El Torito catalogue and an isohybrid MBR/GPT are present.
 
 xorriso is the only tool that has to be recent; if it is not installed, the build
 uses it from a throwaway `ubuntu:24.04` container (built once, tagged
@@ -127,6 +214,15 @@ monitor the way a person at a console would, waits for the install to reboot the
 machine, boots what was installed, signs in over SSH as the default identity, and
 checks that the payload really landed — the first-boot script, its unit enabled, the
 settings example, the account, the SSH server — and prints the first boot's log.
+
+It takes grub's default entry, which is the unattended install on the machine's disk:
+that is the path an operator most often walks, and the one a regression would break
+silently. The *disk you choose* entry is deliberately **not** covered by it — that one
+stops for a decision about storage, and the test's answer to a prompt is an `Enter`
+keystroke, which is not a choice of disk. Its autoinstall, its `toram` and its
+placement in the menu are held by `scripts/tests/test_patch_grub.py` and by the
+build's own verification instead, and a boot of it is worth doing once by hand before
+you hand the stick to somebody.
 
 ```bash
 make installer-iso-test                       # the newest ISO in dist/
@@ -147,7 +243,11 @@ actually is — on the range host itself.
 
 | Symptom | Cause |
 | --- | --- |
-| The installer asks every question | the boot entry did not get the autoinstall: check the `ds=nocloud` line the build printed, and `/nocloud` on the ISO |
+| The installer asks every question, the machine installs interactively, and nothing at all appears on the serial console | the boot entry's datasource argument is not **quoted**. Grub ends an argument at `;`, so `autoinstall ds=nocloud;s=/cdrom/nocloud/ console=ttyS0` reaches the kernel as `autoinstall ds=nocloud`: the seed directory is gone (so cloud-init finds no autoinstall), `console=ttyS0` goes with it, and nothing — grub, the kernel or the installer — says a word about it | it is a one-character-class fix in the source of the menu, `infra/installer/patch-grub.py`, and the build now refuses to produce an image whose entries are unquoted. On a finished image, check with `xorriso -osirrox on -indev <iso> -extract /boot/grub/grub.cfg -` and look for `autoinstall "ds=nocloud;s=/cdrom/nocloud/"` |
+| The installer asks every question, but the boot entry does look right | the autoinstall is not where the entry says it is | check the `ds=nocloud` path the build printed against `/nocloud` and `/nocloud-choose-disk` on the ISO |
+| The installer sits on a screen asking about **basic or rich mode**, and the machine's own keyboard does nothing | that is subiquity's serial-console question: the entry carries `console=ttyS0`, so its UI is on the serial console and the VGA keyboard is not connected to it | answer it over serial, or boot with `console=ttyS0` removed from the entry (`e` at the grub menu) to install from the monitor — see [Which console the installer answers on](#which-console-the-installer-answers-on) |
+| The menu offers one install, or Canonical's titles rather than OnTrak's | the grub.cfg was not patched — an ISO built by something else, or by a revision before the second entry existed | the build fails loudly on this (`no /casper/vmlinuz boot entry to patch`); to check a finished image, `xorriso -osirrox on -indev <iso> -extract /boot/grub/grub.cfg -` and look for both titles |
+| The choose-disk install stops before it starts, or comes back saying it cannot find an autoinstall | the entry did not get `toram` and the autoinstall is being read from a medium the installer is also erasing | install from virtual media or a second stick onto the first, or put `toram` back: it belongs on the choose-disk entries and only on those |
 | "Waiting for the autoinstall to be fetched by subiquity" never clears | the ISO was written with a tool that stripped the `appended partition`/MBR area — write it with `dd`, or boot it as virtual media |
 | The install ends powered off | `shutdown` in `autoinstall/user-data.dist` was changed; the reboot is what runs the first-boot unit |
 | `install-test.sh` refuses to start | no usable `/dev/kvm` on that machine — it is not a bug, it is the test declining to spend hours emulating one install (`ONTRAK_INSTALL_TEST_ALLOW_TCG=1` accepts the slow path) |
