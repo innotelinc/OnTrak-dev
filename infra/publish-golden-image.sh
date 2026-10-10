@@ -6,8 +6,8 @@
 #
 # `infra/import-golden-image.sh` brings a golden image in from another host's
 # filesystem. This is the same move over a network: the image goes to a registry
-# once, and every range that cannot build it — a host whose KVM is nested on an AMD
-# CPU, a classroom of thin hosts, a colleague's laptop — pulls it instead. See
+# once, and every range that cannot build it — a host whose KVM cannot virtualise
+# SMM, a classroom of thin hosts, a colleague's laptop — pulls it instead. See
 # docs/operations.md, "Publishing the golden image to a registry".
 #
 # What to publish is the split export the build writes (`incus.tar.xz` plus

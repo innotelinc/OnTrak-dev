@@ -1,18 +1,19 @@
 """The QEMU accelerator decision, and the instance config it writes.
 
-The rule is small enough to state in one line — use KVM unless this host's KVM is
-nested on AMD, in which case QEMU has to emulate the CPU — but both halves of the
+The rule is small enough to state in one line — KVM wherever this host's
+``/dev/kvm`` answers, the emulator where it does not — but both halves of the
 range depend on it and neither can be run in a test: the golden build wants two
 hours and a Windows ISO, and a template build wants a guest that answers WinRM. So
-the decision is a pure function of three facts (:func:`choose`) and everything
+the decision is a pure function of the host's facts (:func:`choose`) and everything
 around it here is exercised against those facts or against ``FakeIncus``.
 
 What is worth pinning down is not "tcg was returned" but the two ways this can
 hurt a range that was working:
 
-* it must not change a host where KVM works — including a nested *Intel* host,
-  which is asserted to keep KVM because nothing here has measured it failing;
-  and
+* it must not take KVM away from a host that has it. A nested AMD host used to
+  lose it on sight, from a single WSL2/Hyper-V measurement that does not hold for
+  nested virtualisation in general — the case below is the one that was measured
+  the other way, on a VMware guest on the same Ryzen; and
 * it must not silently disable anything the guest needs. The values it writes are
   an accelerator and a CPU model, and nothing in this file may touch
   ``security.secureboot`` or the ``tpm`` device.
@@ -33,6 +34,7 @@ BARE_METAL_AMD = Host(kvm=True, virt="none", vendor="AuthenticAMD")
 BARE_METAL_INTEL = Host(kvm=True, virt="none", vendor="GenuineIntel")
 WSL_AMD = Host(kvm=True, virt="wsl", vendor="AuthenticAMD")
 WSL_INTEL = Host(kvm=True, virt="wsl", vendor="GenuineIntel")
+VMWARE_AMD = Host(kvm=True, virt="vmware", vendor="AuthenticAMD")
 NO_KVM = Host(kvm=False, virt="wsl", vendor="GenuineIntel")
 
 
@@ -44,13 +46,20 @@ def test_a_host_with_usable_kvm_gets_it():
     assert choose(BARE_METAL_INTEL) == KVM
 
 
-def test_nested_amd_kvm_falls_back_to_software_emulation():
-    """The measurement this exists for: WSL2/Hyper-V on a Ryzen."""
-    assert choose(WSL_AMD) == TCG
+def test_a_nested_amd_host_keeps_kvm():
+    """The rule this replaced moved every nested AMD host to the emulator.
+
+    It came from WSL2/Hyper-V on a Ryzen and was generalised to nesting itself,
+    which the measurement does not support: on a VMware guest on the same CPU,
+    with nested virtualisation exposed underneath, an OVMF guest with Secure Boot
+    and SMM on boots and answers under KVM. A rule that cannot tell those two
+    hosts apart costs the one that works hours per guest.
+    """
+    assert choose(WSL_AMD) == KVM
+    assert choose(VMWARE_AMD) == KVM
 
 
-def test_nested_intel_kvm_keeps_kvm_because_nothing_here_measured_otherwise():
-    """The rule is one measurement, not a theory about all nesting."""
+def test_nested_intel_kvm_keeps_kvm_too():
     assert choose(WSL_INTEL) == KVM
 
 
@@ -60,17 +69,20 @@ def test_a_host_with_no_kvm_cannot_use_it():
 
 def test_the_operator_can_settle_it_either_way():
     assert choose(WSL_AMD, "kvm") == KVM
+    assert choose(VMWARE_AMD, "tcg") == TCG  # the host that cannot virtualise SMM
     assert choose(BARE_METAL_INTEL, "tcg") == TCG
     assert choose(NO_KVM, "  TCG  ") == TCG  # forgiving about how it is typed
-    assert choose(WSL_AMD, "banana") == TCG  # nonsense does not overrule the host
+    assert choose(NO_KVM, "banana") == TCG  # nonsense does not overrule the host
+    assert choose(WSL_AMD, "banana") == KVM
 
 
-def test_reason_names_the_accelerator_and_says_which_host_it_is():
-    fallback = reason(WSL_AMD, TCG)
-    assert "TCG" in fallback and "wsl" in fallback
-    assert "KVM+SMM" in fallback
+def test_reason_names_the_accelerator_and_says_why():
     assert "hardware virtualisation" in reason(BARE_METAL_AMD, KVM)
     assert "no usable /dev/kvm" in reason(NO_KVM, TCG)
+    # The one case left where a host with KVM is emulated anyway, named so the
+    # slowness has an explanation on the page rather than being a mystery.
+    overruled = reason(VMWARE_AMD, TCG)
+    assert "ONTRAK_QEMU_ACCEL" in overruled and "SMM" in overruled
 
 
 # --------------------------------------------------------------------------- #
@@ -217,3 +229,44 @@ def test_the_cli_says_how_to_use_it(capsys):
     assert "apply <instance>" in capsys.readouterr().out
     assert qemu.main([]) == 2
     assert qemu.main(["nonsense"]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# whose packages these are
+# --------------------------------------------------------------------------- #
+def test_the_package_list_is_about_the_machine_it_ran_on(monkeypatch):
+    """A portal container is not the machine the guests run on.
+
+    Start a range with `docker compose` and the portal reports five missing
+    packages and no OVMF for a Docker host that has all of them, because dpkg and
+    /usr/share are the *container's*. `checked_here` is how a caller tells the two
+    apart; `doctor` reads it before it calls anything a failure.
+    """
+    monkeypatch.setattr(qemu, "in_container", lambda: True)
+    assert qemu.report()["checked_here"] is False
+
+    monkeypatch.setattr(qemu, "in_container", lambda: False)
+    assert qemu.report()["checked_here"] is True
+
+
+def test_the_preflight_says_so_when_it_is_not_on_the_host(capsys, monkeypatch):
+    """The note, not a different exit code: in a container the answer is that the
+    question belongs to another machine, and the fields above it are the container's.
+    """
+    monkeypatch.setenv("ONTRAK_QEMU_ACCEL", TCG)
+    monkeypatch.setattr(qemu, "in_container", lambda: True)
+    monkeypatch.setattr(qemu, "missing_packages", lambda: ["swtpm"])
+    monkeypatch.setattr(qemu, "ovmf", dict)
+    assert qemu.main(["check"]) == 1  # the software path is still missing for *this* machine
+    err = capsys.readouterr().err
+    assert "not the machine the guests run on" in err
+    assert "infra/qemu-accel.sh --check" in err
+
+
+def test_the_preflight_is_silent_about_containers_on_a_host(capsys, monkeypatch):
+    monkeypatch.setenv("ONTRAK_QEMU_ACCEL", TCG)
+    monkeypatch.setattr(qemu, "in_container", lambda: False)
+    monkeypatch.setattr(qemu, "missing_packages", lambda: ["swtpm"])
+    monkeypatch.setattr(qemu, "ovmf", dict)
+    assert qemu.main(["check"]) == 1
+    assert "not the machine the guests run on" not in capsys.readouterr().err

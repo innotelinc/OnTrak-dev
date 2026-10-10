@@ -205,11 +205,12 @@ golden: ## Build the golden Windows image (30-60 min; downloads Windows eval med
 	ONTRAK_GUEST__PASSWORD="$$guest" bash infra/build-golden-image.sh
 
 golden-import: ## Publish a golden image built on another host (make golden-import ARGS=/path/to/export)
-	@# Not every host can build it: one whose KVM is nested on an AMD CPU cannot
-	@# virtualise SMM, so Windows Setup dies before it starts. Build where that
-	@# works and bring the export here — see docs/operations.md, "Building the
-	@# golden image on a nested host". The disk is checked before it is published,
-	@# because a half-applied image imports fine and then hangs every template.
+	@# Not every host can build it: one whose KVM cannot virtualise SMM loses
+	@# Windows Setup before it starts (measured on nested AMD; nesting alone does
+	@# not decide it). Build where that works and bring the export here — see
+	@# docs/operations.md, "Building the golden image on a nested host". The disk is
+	@# checked before it is published, because a half-applied image imports fine
+	@# and then hangs every template.
 	bash infra/import-golden-image.sh $(ARGS)
 
 golden-pull: ## Pull a published golden image (make golden-pull ARGS=win11e-2026-10-06)

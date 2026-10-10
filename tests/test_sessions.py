@@ -58,8 +58,8 @@ def test_a_template_on_a_host_that_cannot_run_kvm_is_emulated(manager, incus, mo
     """The point of the fallback: the guest starts on a host that cannot do SMM.
 
     incusd writes `-cpu host,hv_passthrough` and `[machine] accel = "kvm"` for every
-    VM, and on a host whose KVM is nested on AMD that guest goes to ERROR seconds
-    after it starts. A template that cannot boot is a range that hands out broken
+    VM, and on a host whose KVM cannot virtualise SMM that guest goes to ERROR
+    seconds after it starts. A template that cannot boot is a range that hands out broken
     machines, so the accelerator is set when the template is made — and the clones
     inherit it, which is what makes the pool and the students' VMs work too.
     """

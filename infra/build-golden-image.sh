@@ -107,8 +107,8 @@ command -v genisoimage >/dev/null || die "genisoimage is required by incus for t
 # -------------------------------------------------------- host accelerator --
 # Windows 11 Setup needs Secure Boot, and in OVMF Secure Boot means SMM. A host
 # whose own virtualisation is *nested* may be unable to virtualise SMM at all. It
-# was measured on nested AMD SVM (WSL2/Hyper-V on a Ryzen): the build VM enters
-# ERROR seconds after launch and its qemu log ends with
+# was measured on one such host -- nested AMD SVM (WSL2/Hyper-V on a Ryzen): the
+# build VM enters ERROR seconds after launch and its qemu log ends with
 #
 #     KVM: entry failed, hardware error 0xffffffff
 #     ... EIP=00008000 ... SMM=1 HLT=0
@@ -121,7 +121,12 @@ command -v genisoimage >/dev/null || die "genisoimage is required by incus for t
 # A host like that can still run the guest: QEMU can emulate the CPU. That is the
 # fallback here, and it is why this block no longer refuses. The decision lives in
 # ontrak/qemu.py -- the same one the range's own templates and student sessions ask
-# for -- and infra/qemu-accel.sh is how a shell script asks it. The rewrite further
+# for -- and infra/qemu-accel.sh is how a shell script asks it. That decision reads
+# one fact, whether /dev/kvm answers; it used to move every nested AMD host to the
+# emulator on sight, which took KVM away from hosts that can virtualise SMM (a
+# VMware guest on a Ryzen does). Nesting is not the test; the failure above is, and
+# ONTRAK_QEMU_ACCEL=tcg is how an operator whose host shows it falls back. The
+# rewrite further
 # down puts the answer on the build VM, which pack.sh creates, not this script.
 #
 # It is worth deciding up front because the build costs a 5 GiB ISO download and an
@@ -138,7 +143,7 @@ ADDRESS_ATTEMPTS="${ONTRAK_GOLDEN_ADDRESS_ATTEMPTS:-60}"
 GOLDEN_READY_TIMEOUT="${ONTRAK_GOLDEN_READY_TIMEOUT:-1200}"
 if [[ "$ACCEL" == tcg ]]; then
   if [[ "${ONTRAK_GOLDEN_REQUIRE_KVM:-}" == "1" ]]; then
-    die "ONTRAK_GOLDEN_REQUIRE_KVM=1, and this host cannot give the guest KVM: $("$HELPER" --reason). Build the image where KVM is not nested -- bare-metal Linux, or a cloud VM with nested virtualisation -- then copy it in (see docs/operations.md, 'Building the golden image on a nested host'), or leave ONTRAK_GOLDEN_REQUIRE_KVM unset and let QEMU emulate the CPU."
+    die "ONTRAK_GOLDEN_REQUIRE_KVM=1, and this host cannot give the guest KVM: $("$HELPER" --reason). Build the image on a host whose KVM can virtualise SMM -- bare-metal Linux, or a VM whose nested virtualisation exposes it -- then copy it in (see docs/operations.md, 'Building the golden image on a nested host'), or leave ONTRAK_GOLDEN_REQUIRE_KVM unset and let QEMU emulate the CPU."
   fi
   log "$("$HELPER" --reason)"
   warn "the build VM is emulated: the guest runs several times slower than it would on a host with KVM"
@@ -311,8 +316,8 @@ fi
 # is installed past the gate Windows 11 normally insists on.
 #
 # Note this does NOT rescue a host that cannot virtualise SMM: with Secure Boot off,
-# OVMF still uses SMM for its runtime services, so the nested-AMD host the preflight
-# above refuses still fails. That is checked before the build, not here.
+# OVMF still uses SMM for its runtime services, so a host with that fault still
+# fails the build VM. It is checked before the build, not here.
 if [[ "${ONTRAK_GOLDEN_NO_SECUREBOOT:-}" =~ ^(1|true|yes|on)$ ]]; then
   warn "ONTRAK_GOLDEN_NO_SECUREBOOT set: building with Secure Boot and TPM OFF."
   warn "  The image installs past the Windows 11 TPM/Secure Boot gate, so it is not"

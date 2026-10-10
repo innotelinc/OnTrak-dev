@@ -1,5 +1,6 @@
 """Which QEMU accelerator a Windows guest gets, and what to do when KVM cannot
-give it one.
+give it one. KVM is asked for wherever the host's ``/dev/kvm`` answers; the two
+settings below are the exception, for the host that cannot virtualise SMM.
 
 Every Windows guest in this range — the golden image incus-windows builds, the
 scenario templates cloned from it, the machines students sit in front of — is a
@@ -22,7 +23,7 @@ takes the last ``-cpu``, so it overrides the hard-coded one.
 
 That matters because KVM is not always available to a Windows guest. Windows 11
 needs Secure Boot, in OVMF Secure Boot means SMM, and a host whose own
-virtualisation is *nested on AMD* cannot virtualise SMM at all. Measured on WSL2
+virtualisation is nested may not be able to virtualise SMM at all. Measured on WSL2
 (Hyper-V) on a Ryzen: the instance reports ``RUNNING`` and then goes ``ERROR`` ten
 to twenty seconds later, and its qemu log ends
 
@@ -33,6 +34,17 @@ Turning Secure Boot and the TPM off does not help — OVMF uses SMM for its runt
 services either way — ``-machine smm=off`` only trades the crash for a guest that
 spins without writing a sector, and a legacy-BIOS (CSM/SeaBIOS) build hangs the
 same way. The host is not broken; there is one thing it cannot do.
+
+That is a fact about one host, not about nesting on AMD, and this module used to
+read it as the latter: a nested AMD host was moved to the emulator on sight. The
+rule is gone, because it was wrong — measured on a VMware guest on the same Ryzen,
+with nested virtualisation exposed by the hypervisor underneath, an OVMF guest
+with Secure Boot and SMM on boots and answers under ``accel = "kvm"``, and a
+Windows guest does too (see docs/operations.md). What is left is the honest
+version: ask for KVM whenever this host's ``/dev/kvm`` answers, hand the guest the
+emulator when it does not, and give the operator ``ONTRAK_QEMU_ACCEL=tcg`` for the
+host that really cannot virtualise SMM. The signature above is how that host is
+recognised.
 
 QEMU can still do it, in software. This module decides whether KVM will serve and,
 when it will not, hands the guest the two settings that move it to TCG:
@@ -109,7 +121,12 @@ REQUIRED_PACKAGES = ("qemu-system-x86", "qemu-utils", "ovmf", "swtpm", "swtpm-to
 
 @dataclass(frozen=True)
 class Host:
-    """The three facts the decision turns on."""
+    """What this host is: the fact the decision turns on, and two for the report.
+
+    Only ``kvm`` decides the accelerator. ``virt`` and ``vendor`` are here so
+    ``report()`` and the preflight can tell an operator which host they are on —
+    the pair that names the hosts where KVM cannot virtualise SMM.
+    """
 
     kvm: bool
     virt: str
@@ -178,21 +195,52 @@ def host() -> Host:
     return Host(kvm=_kvm_usable(), virt=_detect_virt(), vendor=_cpu_vendor())
 
 
+# What a container looks like from inside one. Docker writes /.dockerenv; every
+# runtime leaves a marker in the cgroup of PID 1, which is what a host cannot have.
+_CONTAINER_MARKERS = ("docker", "kubepods", "containerd", "libpod")
+
+
+def in_container() -> bool:
+    """Whether this process is in a container rather than on the guests' host.
+
+    Everything else here that is not ``_kvm_usable`` reads *this* filesystem — dpkg's
+    package list, OVMF under /usr/share — and the guests run where incusd runs. In a
+    `docker compose` deployment that is the Docker host, so a portal container used
+    to report five missing packages and no firmware for a host that has all six, and
+    `doctor` printed it as a blocking failure. The packages are the host's to own;
+    the fix is not to check harder from here, it is to say which machine the answer
+    is about. ``infra/qemu-accel.sh --check`` is that check, run there.
+    """
+    if os.path.exists("/.dockerenv"):  # noqa: S108 - a well-known marker, not a temp path
+        return True
+    try:
+        with open("/proc/1/cgroup", encoding="utf-8", errors="replace") as fh:
+            cgroup = fh.read()
+    except OSError:
+        return False
+    return any(marker in cgroup for marker in _CONTAINER_MARKERS)
+
+
 def choose(host_facts: Host, override: str = "") -> str:
     """Which accelerator to ask for. Pure, so a test can hand it any host.
 
-    The nested-AMD rule is a measurement, not a preference: it is the one
-    condition under which KVM is known to fail here rather than merely be slow.
-    Nothing about a nested Intel host is asserted, so it keeps KVM until someone
-    measures otherwise, and ``ONTRAK_QEMU_ACCEL`` settles any host this gets wrong
-    in either direction.
+    KVM whenever the host's ``/dev/kvm`` answers, the emulator when it does not,
+    and ``ONTRAK_QEMU_ACCEL`` settles a host this gets wrong in either direction.
+
+    There used to be a third case: a host whose own virtualisation was nested on
+    AMD was moved to the emulator on sight. That rule is gone. It came from one
+    measurement — WSL2/Hyper-V on a Ryzen, where KVM could not virtualise SMM — and
+    it was written as a property of every nested AMD host, which is not what was
+    measured. VMware's nested virtualisation on the same CPU does virtualise SMM,
+    so the rule was taking the accelerator away from hosts that could use it, at
+    the cost of hours per guest. ``virt`` and ``vendor`` are still read and still
+    reported (``report()``) — they are how an operator recognises the host that
+    needs ``ONTRAK_QEMU_ACCEL=tcg`` — but nothing decides on them any more.
     """
     explicit = (override or "").strip().lower()
     if explicit in {KVM, TCG}:
         return explicit
     if not host_facts.kvm:
-        return TCG
-    if host_facts.virt not in {"", "none", "unknown"} and host_facts.vendor == "AuthenticAMD":
         return TCG
     return KVM
 
@@ -211,9 +259,12 @@ def reason(host_facts: Host, accel_name: str) -> str:
             "accelerator: QEMU TCG (no usable /dev/kvm on this host, so the "
             "software emulator is the only one available)"
         )
+    # A /dev/kvm this host can open, and an operator who overruled it anyway: the
+    # one case left where the emulator is chosen for a host that could run KVM.
+    # Worth naming, because the guests are slower for it and nothing else says so.
     return (
-        f"KVM detected but KVM+SMM unavailable under {host_facts.virt}; "
-        "using QEMU TCG fallback"
+        f"accelerator: QEMU TCG (ONTRAK_QEMU_ACCEL overrules KVM on this "
+        f"{host_facts.virt} guest; a guest that cannot virtualise SMM needs it)"
     )
 
 
@@ -315,7 +366,14 @@ def missing_packages(packages: tuple[str, ...] = REQUIRED_PACKAGES) -> list[str]
 
 
 def report() -> dict[str, Any]:
-    """Everything an operator or a preflight wants to know about this host."""
+    """Everything an operator or a preflight wants to know about this host.
+
+    ``checked_here`` is the field a caller has to read before it believes the last
+    two: ``ovmf`` and ``missing_packages`` describe the machine this ran on, and a
+    portal container is not the machine that runs the guests. The accelerator is the
+    exception — it is decided here on purpose, for guests that will run there — and
+    it is why the device is passed into the container (docker-compose.yml).
+    """
     host_facts = host()
     name = choose(host_facts, os.environ.get("ONTRAK_QEMU_ACCEL", ""))
     return {
@@ -326,6 +384,7 @@ def report() -> dict[str, Any]:
         "vendor": host_facts.vendor,
         "ovmf": ovmf(),
         "missing_packages": missing_packages(),
+        "checked_here": not in_container(),
     }
 
 
@@ -336,6 +395,15 @@ def _print_report() -> int:
     print(json.dumps(data, indent=2))
     missing = data["missing_packages"]
     firmware = data["ovmf"]
+    # Said before any verdict, because in a container the two fields below are a
+    # statement about the container and the exit code would be a lie either way.
+    if not data["checked_here"]:
+        print(
+            "[i] this is a container, so the package and firmware fields above describe\n"
+            "    the container and not the machine the guests run on. Run this on the\n"
+            "    Incus host instead (infra/qemu-accel.sh --check).",
+            file=sys.stderr,
+        )
     if data["accel"] != TCG:
         return 0
     problems = []

@@ -137,6 +137,16 @@ services:
     container_name: ontrak-portal
     restart: unless-stopped
     init: true
+    # The host's KVM, because this container is where the accelerator is decided.
+    # Student machines are clones of a template, and the clone is created here: with
+    # the device absent, `ontrak/qemu.py` cannot open /dev/kvm, decides the guests
+    # must be emulated, and pins `accel = "tcg"` on every session — on a host whose
+    # KVM works, which shows up as a range that is mysteriously slow rather than as
+    # an error. `ontrak template build` runs on the host and sees the same KVM, so
+    # the template and its clones are decided by the same fact. Read-only, and the
+    # only thing this grants is the ioctl the decision makes.
+    devices:
+      - /dev/kvm:/dev/kvm
     depends_on:
       lab-setup:
         condition: service_completed_successfully
@@ -189,6 +199,12 @@ services:
       ONTRAK_INCUS__NETWORK: ${ONTRAK_INCUS__NETWORK:-ontrak0}
       ONTRAK_INCUS__PROFILE: ${ONTRAK_INCUS__PROFILE:-ontrak-student}
       ONTRAK_INCUS__IMAGE_ALIAS: ${ONTRAK_INCUS__IMAGE_ALIAS:-ontrak-win-base}
+      # `kvm` or `tcg`, and unset is the normal answer: the accelerator is otherwise
+      # decided from /dev/kvm above. Set it to `tcg` on a host whose KVM cannot
+      # virtualise SMM (Windows 11 needs it, and such a guest goes to ERROR seconds
+      # after it starts) — docs/operations.md, "Building the golden image on a
+      # nested host". Set it to `kvm` only to overrule a host that looks emulated.
+      ONTRAK_QEMU_ACCEL: ${ONTRAK_QEMU_ACCEL:-}
 
       # ── guest automation ──
       # winrm (Windows guests), ssh (Linux guests), incus-exec, or null for a

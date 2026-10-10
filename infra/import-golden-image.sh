@@ -4,11 +4,11 @@
 #
 #   infra/import-golden-image.sh [export-directory]
 #
-# `infra/build-golden-image.sh` cannot run everywhere. A host whose KVM is nested
-# on an AMD CPU cannot virtualise SMM, so the Windows installer dies before Setup
-# starts (docs/operations.md, "Building the golden image on a nested host"). Build
-# the image where that works -- bare metal, or a VM with nested virtualisation --
-# and bring the result here.
+# `infra/build-golden-image.sh` cannot run everywhere. A host whose KVM cannot
+# virtualise SMM -- measured on nested AMD SVM -- loses the Windows installer
+# before Setup starts (docs/operations.md, "Building the golden image on a nested
+# host"). Build the image where that works -- bare metal, or a VM whose nested
+# virtualisation exposes it -- and bring the result here.
 #
 # What to bring is the directory incus-windows writes its export to. Point at it
 # with the argument, or leave the argument off and it looks where the build puts

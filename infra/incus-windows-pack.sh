@@ -156,10 +156,10 @@ pack_no_secureboot() {
 # time and there is no setting that changes it. For a VM, incusd always ends up
 # with `-cpu host,hv_passthrough` on the QEMU command line and `[machine] accel =
 # "kvm"` in the config file it passes to `-readconfig`. Both are wrong on a host
-# whose own virtualisation is nested on AMD, and both fail loudly rather than
-# slowly: Windows 11 needs Secure Boot, in OVMF Secure Boot means SMM, and nested
-# AMD SVM cannot virtualise SMM. The build VM then goes to ERROR ten to twenty
-# seconds after it starts, and its qemu log ends
+# whose KVM cannot virtualise SMM, and both fail loudly rather than slowly: Windows
+# 11 needs Secure Boot, in OVMF Secure Boot means SMM, and a host with that fault
+# cannot virtualise it (measured on nested AMD SVM). The build VM then goes to
+# ERROR ten to twenty seconds after it starts, and its qemu log ends
 #
 #     KVM: entry failed, hardware error 0xffffffff
 #     ... EIP=00008000 ... SMM=1 HLT=0
