@@ -365,8 +365,14 @@
     timer.textContent = m + ':' + (s < 10 ? '0' : '') + s;
     if (remaining <= 300) { timer.classList.add('low'); }
   }
-  paint();
-  setInterval(function () { remaining = Math.max(0, remaining - 1); paint(); }, 1000);
+  // The countdown element is only rendered while the session is live. Guarding the whole
+  // block on it matters beyond the clock: an unguarded paint() throws on a machine that is
+  // still booting, which aborts the rest of this script — including the status polling
+  // below, so the page would never reload itself once the machine was ready.
+  if (timer) {
+    paint();
+    setInterval(function () { remaining = Math.max(0, remaining - 1); paint(); }, 1000);
+  }
 
   {% if state in ["requested", "allocating", "provisioning"] %}
   setInterval(async function () {
