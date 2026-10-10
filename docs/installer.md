@@ -146,8 +146,16 @@ this: no baked settings, no floors, no label, and the pool configured by hand in
 ## A portable range, on a USB stick
 
 The *disk you choose* entry is how a stick becomes a range host: write the ISO to a
-stick, boot it, install onto the stick, then boot the stick. Four things are worth
-knowing first.
+stick, boot it, install onto the stick, then boot the stick.
+
+```bash
+make installer-iso-usb                 # the newest ISO in dist/, onto the one USB disk
+make installer-iso-usb ARGS=/dev/sdX   # ...or name the disk to write to
+```
+
+That is not a one-line `dd`, and [Writing it to a stick](#writing-it-to-a-stick) says
+why with the measurement. Four things about the *installed* stick are worth knowing
+first.
 
 * **There is no live mode, and there cannot be.** A server ISO has no live session —
 the only thing that boots off it is the installer — so "run the range from the stick"
@@ -201,6 +209,32 @@ sudo /usr/local/sbin/ontrak-firstboot.sh --force
 
 A host that has no `/dev/kvm` still gets the portal; it just cannot create
 machines, and the script says so rather than dying quietly.
+
+### Writing it to a stick
+
+`infra/installer/write-usb.sh` picks the one whole USB disk that is removable, has
+nothing mounted and is not the disk the running system is on — and refuses rather
+than guessing when that is not exactly one device. Then it does two things a plain
+`dd` does not, both of them from measurement rather than caution:
+
+* **It writes in 64 MiB chunks**, `oflag=direct`, one fsync each, retrying a chunk
+  that fails after giving the device a moment — so a failure names the offset it died
+  at. Measured here: **two plain 3.8 GB writes killed the stick** (`sd … Device
+  offlined - not ready after error recovery`, with `xhci_hcd … AMD-Vi: Event logged
+  [IO_PAGE_FAULT]` alongside) at 3.5 GB and at 3.75 GB of 4.07 GB, and the flash that
+  worked lost its *first* chunk to an I/O error and then wrote the other sixty
+  cleanly. A one-shot `dd` reports none of that until the whole image is in the page
+  cache.
+* **It reads the stick back and hashes it against the ISO.** "The write returned 0"
+  is not evidence: a stick that error-recovered mid-write holds a plausible image with
+  a hole in it, and that hole is a grub prompt on the machine in front of the operator
+  rather than an error here.
+
+If you would rather use `dd`, then `dd if=<iso> of=/dev/sdX bs=4M oflag=direct
+conv=fsync` is the form that does not hand 3.8 GB to the page cache at once — and
+verify it yourself, because `dd` will not: `blkid /dev/sdX` should say
+`TYPE="iso9660"`, and mounting it read-only should show `boot/grub/grub.cfg` and the
+`nocloud/` directories.
 
 ## What it deliberately does not do
 
@@ -330,7 +364,9 @@ actually is — on the range host itself.
 | The installer sits on a screen asking about **basic or rich mode**, and the machine's own keyboard does nothing | that is subiquity's serial-console question: the entry carries `console=ttyS0`, so its UI is on the serial console and the VGA keyboard is not connected to it | answer it over serial, or boot with `console=ttyS0` removed from the entry (`e` at the grub menu) to install from the monitor — see [Which console the installer answers on](#which-console-the-installer-answers-on) |
 | The menu offers one install, or Canonical's titles rather than OnTrak's | the grub.cfg was not patched — an ISO built by something else, or by a revision before the second entry existed | the build fails loudly on this (`no /casper/vmlinuz boot entry to patch`); to check a finished image, `xorriso -osirrox on -indev <iso> -extract /boot/grub/grub.cfg -` and look for both titles |
 | The choose-disk install stops before it starts, or comes back saying it cannot find an autoinstall | the entry did not get `toram` and the autoinstall is being read from a medium the installer is also erasing | install from virtual media or a second stick onto the first, or put `toram` back: it belongs on the choose-disk entries and only on those |
-| "Waiting for the autoinstall to be fetched by subiquity" never clears | the ISO was written with a tool that stripped the `appended partition`/MBR area — write it with `dd`, or boot it as virtual media |
+| "Waiting for the autoinstall to be fetched by subiquity" never clears | the ISO was written with a tool that stripped the `appended partition`/MBR area — write it with `infra/installer/write-usb.sh`, which writes the whole device and verifies it, or boot it as virtual media |
+| The write dies part-way, or the stick disappears from the bus mid-write | the failure is in the medium or its port, not the image: `sd … Device offlined - not ready after error recovery`, usually with `xhci_hcd … IO_PAGE_FAULT`. The writer retries the chunk it lost; if it dies at the same offset every time, try another stick — or attach this one to a VM as a raw physical disk instead of as a USB device, which avoids that path entirely |
+| A stick that was just written boots to Canonical's menu, or to a grub prompt | the device still held an older or partial image and the write did not land — everything from the old image that the new one does not overwrite is still there. Write it again with the writer (it overwrites the whole device and verifies the result); a file-copy tool will not do, and neither will a write that reported success on a stick that error-recovered |
 | The install ends powered off | `shutdown` in `autoinstall/user-data.dist` was changed; the reboot is what runs the first-boot unit |
 | `install-test.sh` refuses to start | no usable `/dev/kvm` on that machine — it is not a bug, it is the test declining to spend hours emulating one install (`ONTRAK_INSTALL_TEST_ALLOW_TCG=1` accepts the slow path) |
 | First boot says the hypervisor is not ready | no `/dev/kvm`: enable VT-x/AMD-V, or nested virtualisation in a VM — then `sudo /usr/local/sbin/ontrak-firstboot.sh --force` |

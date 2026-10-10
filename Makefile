@@ -20,6 +20,7 @@ REMOTE_OVERLAY := -f docker-compose.yml -f docker-compose.remote.yml
         catalog catalog-validate media-status media-fetch generate schedule \
         golden golden-import golden-pull templates pool reap demo-serve host-image landing \
         installer-iso installer-iso-smoke installer-iso-test installer-iso-tiers \
+        installer-iso-usb \
         build publish-image up up-remote down logs ps exec check-compose setup-log \
         docker-demo docker-shell provision provision-plan console-recreate \
         local-auth local-auth-down
@@ -65,6 +66,17 @@ installer-iso-test: ## Install a machine from the built ISO in QEMU, then check 
 	@iso="$$(ls -t dist/*.iso 2>/dev/null | head -1)"; \
 	test -n "$$iso" || { echo "no ISO in dist/ — run 'make installer-iso' first"; exit 2; }; \
 	bash infra/installer/install-test.sh "$$iso"
+
+installer-iso-usb: ## Write an installer ISO to a USB stick, then verify the stick (ARGS=/dev/sdX)
+	@# The write docs/installer.md used to spell out as one dd, and the measurement
+	@# that replaced it: two plain 3.8 GB writes killed the stick on this host, at
+	@# 3.5 GB and at 3.75 GB of 4.07 GB. This writes in chunks, retries a chunk that
+	@# fails, and reads the stick back against the ISO — a stick that recovered
+	@# mid-write holds a plausible image with a hole in it. Defaults to the newest
+	@# ISO in dist/ and to the one removable USB disk; ARGS names the disk.
+	@iso="$$(ls -t dist/*.iso 2>/dev/null | head -1)"; \
+	test -n "$$iso" || { echo "no ISO in dist/ — run 'make installer-iso' first"; exit 2; }; \
+	bash infra/installer/write-usb.sh "$$iso" $(ARGS)
 
 ## ---- Docker stack (portal + console gateway) ----------------------------
 

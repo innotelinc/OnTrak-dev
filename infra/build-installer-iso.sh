@@ -596,7 +596,13 @@ $(log "installer image ready")
 
 Write it to a USB stick (it boots from BIOS and UEFI):
 
-  sudo dd if=$OUT of=/dev/sdX bs=4M status=progress oflag=sync
+  sudo infra/installer/write-usb.sh $OUT
+
+  That picks the one removable USB disk, writes in 64 MiB chunks with direct
+  I/O, retries a chunk that fails, and then reads the stick back against this
+  ISO. A single buffered write of 3.8 GB has killed a stick on this host, and a
+  stick that error-recovered mid-write holds a plausible image with a hole in it
+  -- see the writer's header for the measurement.
 
 Then boot the target machine from it:
 
