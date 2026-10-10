@@ -55,12 +55,16 @@ plane still starts and demo mode still runs.
 - **The installer ISO.** It is built where it is needed (`make installer-iso`,
   `make installer-iso-tiers`), and the published release exists for a range host
   that has no internet yet. See [installer.md](installer.md).
-- **Nothing else.** The templates are pulled rather than built (`infra/import-templates.sh`),
-  because building one means booting a Windows guest once per scenario and importing
-  one is minutes; `make templates` is the fallback for whatever the registry does not
-  hold, and is what a host without `incus` or `oras` gets. Importing takes the
-  `clean` snapshot and the QEMU accelerator again on the host that will run it, so a
-  pulled template is a template here, not a copy of one.
+
+Everything else is restored, including the two halves that are slow to produce. The
+lab's own portal image is pulled and tagged `ontrak:local`, and the scenario
+templates are imported (`infra/import-templates.sh`) rather than built: building one
+means booting a Windows guest once per scenario, while importing one is minutes.
+`make templates` is the fallback for whatever the registry does not hold, and is what
+a host without `incus` or `oras` gets. Two facts are re-established on the new host
+rather than shipped, because they are about the machine that will run it: the
+`clean` snapshot, and the QEMU accelerator for a host whose KVM differs from the one
+that built the template.
 
 ## After it finishes
 
