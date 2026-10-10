@@ -50,6 +50,11 @@ on:
         description: Base Ubuntu release under releases.ubuntu.com/24.04
         required: false
         default: "24.04.5"
+      tier:
+        description: Sizing tier to build instead of the untiered image (dev, class or full)
+        required: false
+        default: ""
+        type: string
       smoke:
         description: Also boot the image in QEMU and watch for the installer
         type: boolean
@@ -99,6 +104,8 @@ jobs:
           # The 4 GB base image does not belong in the checkout.
           ONTRAK_ISO_CACHE: ${{ runner.temp }}/iso-cache
           ONTRAK_UBUNTU_RELEASE: ${{ inputs.release || '24.04.5' }}
+          # Empty means the untiered image, which is what a push builds.
+          ONTRAK_ISO_TIER: ${{ inputs.tier }}
         run: |
           set -euo pipefail
           mkdir -p "$ONTRAK_ISO_CACHE"
@@ -178,6 +185,58 @@ jobs:
             || { echo "::error::the choose-disk entries do not boot toram"; exit 1; }
 
           echo 'payload: installed, enabled, both destinations patched and quoted'
+
+      # A tiered image is the same install with a machine class baked into it, and
+      # this is the part a person at the console sees: the file name, the menu, the
+      # README, and the settings the installed host will run with. It is checked
+      # against the tier file in the repository, because "the image bakes the tier
+      # file's settings" is the whole contract.
+      - name: The sizing tier is what it says it is
+        if: inputs.tier != ''
+        env:
+          TIER: ${{ inputs.tier }}
+        run: |
+          set -euo pipefail
+          iso="$(ls dist/*.iso | head -1)"
+          echo "image: $iso"
+
+          # The name says which tier it is, or an operator with two sticks cannot
+          # tell them apart before booting one.
+          case "$(basename "$iso")" in
+            *"-$TIER-"*) echo "name carries the tier" ;;
+            *) echo "::error::the image's name does not carry the $TIER tier"; exit 1 ;;
+          esac
+          # A blank path would make ONTRAK_ISO_OUT invisible here, so the fan-out's
+          # own guard has to have kept the name.
+          [ "$TIER" != "" ] || { echo "::error::no tier was requested"; exit 1; }
+
+          for f in ontrak/tier.env ontrak/firstboot.env ontrak/README.txt; do
+            xorriso -osirrox on -indev "$iso" -extract "/$f" "$RUNNER_TEMP/$(basename "$f")" >/dev/null
+          done
+          xorriso -osirrox on -indev "$iso" -extract /boot/grub/grub.cfg "$RUNNER_TEMP/grub.cfg" >/dev/null
+
+          grep -qx "TIER_NAME=$TIER" "$RUNNER_TEMP/tier.env" \
+            || { echo "::error::the image does not carry the $TIER tier record"; exit 1; }
+          grep -q '^TIER_MIN_MEM_GIB=' "$RUNNER_TEMP/tier.env" \
+            || { echo "::error::the tier record names no RAM floor"; exit 1; }
+
+          # The settings on the image are the tier file's own: sorted, and compared.
+          diff <(grep '^ONTRAK_' "infra/installer/tiers/$TIER.env" | sort) \
+               <(grep '^ONTRAK_' "$RUNNER_TEMP/firstboot.env" | sort) \
+            || { echo "::error::the first-boot settings on the image are not $TIER.env's"; exit 1; }
+          grep -q '^ONTRAK_POOL__MAX_TOTAL=' "$RUNNER_TEMP/firstboot.env" \
+            || { echo "::error::the tier bakes no pool ceiling"; exit 1; }
+
+          grep -q "SIZING TIER: $TIER" "$RUNNER_TEMP/README.txt" \
+            || { echo "::error::the README on the image does not name the $TIER tier"; exit 1; }
+          # Both entries, and both kernels, carry the label.
+          labelled="$(grep -c "Install OnTrak on .*\[$TIER\]" "$RUNNER_TEMP/grub.cfg")"
+          echo "menu entries labelled [$TIER]: $labelled"
+          [ "$labelled" -ge 4 ] \
+            || { echo "::error::the menu does not label every installer entry with $TIER"; exit 1; }
+
+          sed -n 's/^TIER_/  TIER_/p' "$RUNNER_TEMP/tier.env"
+          echo 'tier: named, labelled, and baked from the tier file'
 
       # What was built, for a human: the log, the autoinstall that shipped (with
       # the per-build password hash redacted — it is a throwaway, but a hash has

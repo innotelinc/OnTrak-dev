@@ -14,7 +14,13 @@ stick becomes a portable range host (["A portable range"](#a-portable-range-on-a
 ```bash
 make installer-iso                  # → dist/ontrak-installer-24.04.5-amd64.iso
 ONTRAK_ISO_SMOKE=1 make installer-iso-smoke   # ...and boot it in QEMU to prove it
+make installer-iso-tiers            # → one image per sizing tier (dev, class, full)
 ```
+
+One build can also emit **one image per class of machine** — `dev`, `class`, `full` —
+each baked with the settings that machine wants and labelled with the tier it is for:
+["Sizing tiers"](#sizing-tiers-one-image-per-class-of-machine) below. Plain
+`make installer-iso` is unchanged: one untiered image.
 
 ## What the operator does, and what happens
 
@@ -72,6 +78,70 @@ and `scripts/tests/test_patch_grub.py` runs it against the menu this base image
 actually carries — tabs, single-quoted titles, the `linux16` memory tester and the
 `if [ "$grub_platform" = "efi" ]` branch around the UEFI entries included — so a
 release that changes the shape of it fails a test rather than a machine at a console.
+
+## Sizing tiers: one image per class of machine
+
+The same installer is built for the machine it will land on. A **tier** is one image
+built for one class of machine — `dev` for the small host or nested VM a checkout is
+developed on, `class` for a class of 8-12, `full` for a cohort — and it changes three
+things, none of which is the install itself: both entries, both autoinstalls and the
+screens they stop on are identical whatever the tier.
+
+* **What it bakes.** The installed host's `/etc/ontrak/firstboot.env` gets the warm
+  pool's target and ceiling. That is the setting that decides whether a class's first
+  connection is instant and whether the host swaps ([operations.md](operations.md)),
+  so it is the one a tier is worth having for. It is the tier's settings and not the
+  `.example`: choosing a tier is choosing these, and they are documented in
+  `/etc/ontrak/firstboot.env.example` beside it.
+* **What it says about the machine it is for.** A CPU and RAM floor, and how many
+  students it is sized for. The first boot compares the machine with the tier, says
+  so in the log when the machine is *smaller*, and clamps the pool to
+  `(RAM − 8 GiB) ÷ 4 GiB` — the host overhead and the per-VM limit from
+  [operations.md](operations.md). On a machine that meets its tier the clamp never
+  binds; on one that does not, it is the difference between a slow first class and a
+  host that swaps. The tier's own numbers are in `/etc/ontrak/tier.env`, which the
+  first boot reads back rather than trusting the image's name.
+* **What it is called.** The label is in the menu (`… (unattended) [dev]`), in the
+  output's file name, and in the README on the installed machine — which is what tells
+  two OnTrak sticks apart when both are in front of you. The ISO's own volume label is
+  deliberately **not** touched: it is what casper and subiquity look the live medium up
+  by, so it stays `Ubuntu-Server …` whatever the tier.
+
+| Tier | Machine (the capacity table's row) | Students | Pool | Baked settings |
+| --- | --- | --- | --- | --- |
+| `dev` | 4 vCPU / 15 GiB, `dir` storage | 1-2 | target 1, ceiling 1 | pool above, templates off |
+| `class` | 16 vCPU / 64 GiB, copy-on-write | 8-12 | target 4, ceiling 6 | pool above, templates off |
+| `full` | 32 vCPU / 128 GiB, copy-on-write | 20-26 | target 10, ceiling 12 | pool above, templates off |
+
+```bash
+make installer-iso-tiers                        # dev, class and full: one image each
+ONTRAK_ISO_TIERS="class full" make installer-iso
+ONTRAK_ISO_TIER=dev make installer-iso          # one tier, the way the fan-out does it
+```
+
+Each tier is a whole build and a whole verification, from its own extraction of the
+base ISO, so three tiers is three times the work of one — and the property that
+matters: an image is never assembled from a tree another tier has been through.
+`ONTRAK_ISO_OUT` names one file, so it is refused when more than one tier is asked
+for; the default names carry the tier instead.
+
+**A tier does not choose the storage device.** `ONTRAK_STORAGE_SOURCE` is a device on
+one particular machine and an image cannot know it, so the `class` and `full` tiers
+say in their note that the pool wants copy-on-write storage rather than pretending to
+set it — and `ONTRAK_STORAGE_DRIVER`/`ONTRAK_STORAGE_SOURCE` in
+`/etc/ontrak/firstboot.env` is where the operator sets it, **before** the first boot,
+because that is when the pool is created.
+
+The tiers live in `infra/installer/tiers/*.env`, one plain `KEY=value` file each. Not
+shell, deliberately: `TIER_TITLE=OnTrak class range` is not a shell assignment — bash
+would run `class` — so both readers (the build's `tier_value`, `render-tier.py`'s
+parser) take everything after the first `=`). Adding a tier is adding a file;
+`infra/installer/render-tier.py` writes it into the image and
+`infra/installer/tier-check.py` reads it back on the host.
+
+An untiered image — plain `make installer-iso` — is the same installer with none of
+this: no baked settings, no floors, no label, and the pool configured by hand in
+`firstboot.env`.
 
 ## A portable range, on a USB stick
 
@@ -166,6 +236,9 @@ Build-time settings, for `make installer-iso`:
 
 | Variable | Default |
 | --- | --- |
+| `ONTRAK_ISO_TIERS` | none — one untiered image. `dev class full` builds one image per sizing tier (see ["Sizing tiers"](#sizing-tiers-one-image-per-class-of-machine)) |
+| `ONTRAK_ISO_TIER` | unset — the single tier a build names directly, which is what the fan-out runs per tier |
+| `ONTRAK_TIER_LABEL` | the tier file's own `TIER_LABEL` — overrides the label on an image whose tier file you would rather not edit |
 | `ONTRAK_UBUNTU_RELEASE` | `24.04.5` (the base image, from `releases.ubuntu.com/24.04`) |
 | `ONTRAK_BASE_ISO` | a base ISO already on disk, instead of downloading it |
 | `ONTRAK_ISO_OUT` | `dist/ontrak-installer-<release>-amd64.iso` |
@@ -188,18 +261,23 @@ the machine is built.
 3. Renders the autoinstall twice from one template — `machine` into `/nocloud/` and
    `choose-disk` into `/nocloud-choose-disk/`, each with the `meta-data` the nocloud
    datasource requires (`infra/installer/render-autoinstall.py`).
-4. Copies the first-boot payload to `/ontrak/`.
+4. Copies the first-boot payload to `/ontrak/` — and, for a tiered image, renders the
+   tier into it: `/ontrak/tier.env`, `/ontrak/firstboot.env` and the tier's name in
+   `/ontrak/README.txt` (`infra/installer/render-tier.py`).
 5. Retitles and duplicates every `/casper/*vmlinuz` boot entry (the standard and HWE
    kernels) in the extracted `grub.cfg` — the serial console alongside VGA, so a
    headless machine can be installed and watched over serial. One entry per autoinstall,
-   the `choose-disk` one also boots `toram`, and the datasource argument is **quoted**
-   (`infra/installer/patch-grub.py`, and see the troubleshooting row below for why).
+   the `choose-disk` one also boots `toram`, the datasource argument is **quoted**
+   (`infra/installer/patch-grub.py`, and see the troubleshooting row below for why),
+   and a tiered image carries its label on the titles.
 6. Repacks with xorriso, replaying the boot equipment that
    `-report_el_torito as_mkisofs` reports for the original image.
 7. Verifies the payload is on the image — **both** autoinstalls, byte-for-byte against
    the rendered templates — that every boot entry asks for the datasource that was
-   actually written to the image (and that the `choose-disk` ones boot `toram`), and
-   that an El Torito catalogue and an isohybrid MBR/GPT are present.
+   actually written to the image (and that the `choose-disk` ones boot `toram`), that a
+   tiered image's `/ontrak/tier.env` and `/ontrak/firstboot.env` came off the same tier
+   file it was built from (and that its README and menu name the tier), and that an El
+   Torito catalogue and an isohybrid MBR/GPT are present.
 
 xorriso is the only tool that has to be recent; if it is not installed, the build
 uses it from a throwaway `ubuntu:24.04` container (built once, tagged
@@ -214,6 +292,10 @@ monitor the way a person at a console would, waits for the install to reboot the
 machine, boots what was installed, signs in over SSH as the default identity, and
 checks that the payload really landed — the first-boot script, its unit enabled, the
 settings example, the account, the SSH server — and prints the first boot's log.
+
+A **tiered image installs exactly the same way** — the tier changes the settings the
+installed host comes up with, not the install — so this one test covers every tier as
+well as the untiered image.
 
 It takes grub's default entry, which is the unattended install on the machine's disk:
 that is the path an operator most often walks, and the one a regression would break
@@ -254,6 +336,9 @@ actually is — on the range host itself.
 | First boot says the hypervisor is not ready | no `/dev/kvm`: enable VT-x/AMD-V, or nested virtualisation in a VM — then `sudo /usr/local/sbin/ontrak-firstboot.sh --force` |
 | First boot cannot clone | a private remote without `ONTRAK_GIT_TOKEN`; the script prints the token it wants |
 | `make up` fails in the first boot | usually no internet for the image build, or a port already bound — `cd /opt/ontrak && docker compose logs` |
+| The first boot says **this machine is below the *class* tier** | the image was built for a bigger machine than this one. Nothing is broken: the pool is clamped to what this RAM holds and the range comes up. Run the tier that matches the machine, or set `ONTRAK_POOL__DEFAULT_TARGET`/`ONTRAK_POOL__MAX_TOTAL` in `/etc/ontrak/firstboot.env` yourself and `--force` the first boot |
+| The pool is smaller than the tier says, and compose was never told why | that is the clamp: `ontrak-tier-check.py` writes `/var/lib/ontrak/tier-effective.env` and the first boot exports it before `make up`, so the shell's values beat `.env`. The numbers and the reason are in `journalctl -u ontrak-firstboot \| grep -i pool` |
+| "ONTRAK_ISO_OUT names one file, and ONTRAK_ISO_TIERS names N images" | exactly that: the build refuses to write N images to one path. Drop `ONTRAK_ISO_OUT`, or build one tier |
 
 Installation failures leave a tarball at `/var/log/installer-failure.tar.gz` on the
 installed system (`error-commands` in the user-data keeps the installer's own logs).

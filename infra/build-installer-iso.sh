@@ -32,6 +32,15 @@
 # machine, it runs from a container instead — nothing is installed globally.
 #
 # Environment:
+#   ONTRAK_ISO_TIERS       build one image per sizing tier, space- or
+#                          comma-separated (dev, class, full — see
+#                          infra/installer/tiers/ and docs/installer.md,
+#                          "Sizing tiers"). Each tier is its own image, built and
+#                          verified from its own extraction of the base ISO, and
+#                          named dist/ontrak-installer-<tier>-<release>-amd64.iso.
+#                          Unset means one untiered image, exactly as before.
+#   ONTRAK_ISO_TIER        build just this one tier (what the fan-out above runs;
+#                          set it by hand to build one tier the same way)
 #   ONTRAK_UBUNTU_RELEASE  base release under releases.ubuntu.com/24.04
 #                          (default: 24.04.5)
 #   ONTRAK_BASE_ISO        use an ISO already on disk instead of downloading
@@ -77,6 +86,68 @@ die()  { printf '\033[31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 step() { printf '\n\033[1m--- %s\033[0m\n' "$*"; }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required ($2)"; }
+
+# ---------------------------------------------------------------------- tiers --
+# A *sizing tier* is one image built for one class of machine: `dev` for the small
+# host or nested VM a checkout is developed on, `class` for a class of 8-12, `full`
+# for a cohort (infra/installer/tiers/, and docs/installer.md). What a tier changes
+# is not the install — both entries are identical whatever the tier — but what the
+# image bakes into the installed host (its settings), what it says about the machine
+# it is for (its floors), and what its menu and its name are labelled with.
+#
+# ONTRAK_ISO_TIERS builds several: this script re-runs itself once per tier rather
+# than growing a second copy of the build inside itself. That is the point of the
+# fan-out — every tier gets its own extraction, rendering, verification and output,
+# so an image is never assembled from a tree another tier has been through.
+TIER="${ONTRAK_ISO_TIER:-}"
+if [[ -z "$TIER" && -n "${ONTRAK_ISO_TIERS:-}" ]]; then
+  TIERS="${ONTRAK_ISO_TIERS//,/ }"
+  COUNT="$(wc -w <<<"$TIERS")"
+  if [[ -n "${ONTRAK_ISO_OUT:-}" && "$COUNT" -gt 1 ]]; then
+    die "ONTRAK_ISO_OUT names one file, and ONTRAK_ISO_TIERS names $COUNT images.
+    Set ONTRAK_ISO_OUT and one tier, or drop ONTRAK_ISO_OUT and take the default
+    names (dist/ontrak-installer-<tier>-<release>-amd64.iso)."
+  fi
+  for ONE in $TIERS; do
+    log "building the $ONE tier"
+    ONTRAK_ISO_TIER="$ONE" bash "${BASH_SOURCE[0]}" || exit $?
+  done
+  exit 0
+fi
+TIERS_DIR="$INSTALLER_DIR/tiers"
+if [[ -n "$TIER" ]]; then
+  TIER_FILE="$TIERS_DIR/$TIER.env"
+  if [[ ! -f "$TIER_FILE" ]]; then
+    die "no tier '$TIER' in $TIERS_DIR
+    there is: $(cd "$TIERS_DIR" 2>/dev/null && ls *.env 2>/dev/null | sed 's/\.env$//' | tr '\n' ' ')"
+  fi
+  # Tier files are **plain KEY=value**, and deliberately not shell: a title with
+  # spaces in it is not a shell assignment (`TIER_TITLE=OnTrak class range` runs
+  # `class`), and quoting the values would make the two readers disagree about what
+  # the file says. Everything after the first `=` is the value, for this reader and
+  # for render-tier.py's; render-tier.py is also the one that validates the file.
+  tier_value() { # tier_value <key> — the value of one plain KEY=value line
+    sed -n "s/^$1=//p" "$TIER_FILE" | head -1
+  }
+  TIER_LABEL="${ONTRAK_TIER_LABEL:-$(tier_value TIER_LABEL)}"
+  TIER_LABEL="${TIER_LABEL:-$TIER}"
+  TIER_HOSTNAME="$(tier_value TIER_HOSTNAME)"
+  TIER_TITLE="$(tier_value TIER_TITLE)"
+  # The tier names the machine image, its volume id and its menu — the three places
+  # an operator with two sticks in front of them can tell which one they hold. Its
+  # hostname is only a *default*: ONTRAK_INSTALLER_HOSTNAME still wins.
+  HOSTNAME_DEFAULT="${ONTRAK_INSTALLER_HOSTNAME:-${TIER_HOSTNAME:-ontrak-range}}"  # the tier only defaults it
+  # The ISO's volume label is left as Canonical's, tiered image or not: it is what
+  # casper and subiquity look the live medium up by, and a label that no longer says
+  # `Ubuntu-Server …` is a risk with no upside — the tier is on the file name, in the
+  # menu and in the README on the installed machine, which is where a person looks.
+  if [[ -z "${ONTRAK_ISO_OUT:-}" ]]; then
+    OUT="$PROJECT_ROOT/dist/ontrak-installer-${TIER_LABEL}-${RELEASE}-amd64.iso"
+    CREDS="${OUT%.iso}-creds.txt"
+  fi
+  log "tier: $TIER_LABEL — $TIER_TITLE"
+  log "       $TIER_FILE → $OUT"
+fi
 
 mkdir -p "$CACHE" "$WORK" "$(dirname "$OUT")"
 
@@ -124,7 +195,11 @@ fi
 # sides — and `-report_el_torito` output can be replayed verbatim.
 xorriso_run() {
   if [[ "$XORRISO_MODE" == "docker" ]]; then
-    docker run --rm -v "$CACHE:$CACHE" "$BUILDER_IMAGE" xorriso "$@"
+    # The output directory is mounted as well as the cache: the built image is
+    # written straight to where it is published (see $BUILT), which is not
+    # necessarily the cache.
+    docker run --rm -v "$CACHE:$CACHE" -v "$(dirname "$OUT"):$(dirname "$OUT")" \
+      "$BUILDER_IMAGE" xorriso "$@"
   else
     xorriso "$@"
   fi
@@ -142,7 +217,12 @@ if [[ -f "$BASE_ISO" ]]; then
 else
   need curl "downloads the base image"
   log "downloading $BASE_URL"
-  curl -fL --retry 3 --retry-delay 5 --progress-bar -o "$BASE_ISO.part" "$BASE_URL"
+  # --continue-at - so an interrupted download resumes instead of starting the 3.8
+  # GiB again: on a slow link this is the difference between a build and an evening.
+  # The sha256 check below is what makes a resumed file trustworthy — a truncated
+  # one fails it, and the message says to delete the file and re-run.
+  curl -fL --retry 5 --retry-delay 5 --progress-bar --continue-at - \
+    -o "$BASE_ISO.part" "$BASE_URL"
   mv "$BASE_ISO.part" "$BASE_ISO"
 fi
 
@@ -216,9 +296,25 @@ mkdir -p "$EXTRACT/ontrak"
 cp "$INSTALLER_DIR/firstboot/ontrak-firstboot.sh"        "$EXTRACT/ontrak/firstboot.sh"
 cp "$INSTALLER_DIR/firstboot/ontrak-firstboot.service"   "$EXTRACT/ontrak/ontrak-firstboot.service"
 cp "$INSTALLER_DIR/firstboot/firstboot.env.example"      "$EXTRACT/ontrak/firstboot.env.example"
+cp "$INSTALLER_DIR/tier-check.py"                        "$EXTRACT/ontrak/tier-check.py"
 cp "$INSTALLER_DIR/README.txt"                           "$EXTRACT/ontrak/README.txt"
 chmod 0755 "$EXTRACT/nocloud" "$EXTRACT/ontrak" "$EXTRACT/ontrak/firstboot.sh"
+chmod 0755 "$EXTRACT/ontrak/tier-check.py"
 log "wrote /ontrak (first-boot payload)"
+
+# The tier's own files, when this image is one: /ontrak/tier.env (what machine it
+# is for) and /ontrak/firstboot.env (the settings that go with it), plus a line in
+# the README saying which tier this is. The script renders those, and it runs after
+# the payload is copied because it annotates the README that was just written.
+if [[ -n "$TIER" ]]; then
+  python3 "$INSTALLER_DIR/render-tier.py" \
+    --tier "$TIER" --tiers-dir "$TIERS_DIR" --iso-tree "$EXTRACT"
+  # Keep what we shipped, as with the autoinstalls above, so a finished image can be
+  # accounted for against the tier file it came from rather than against a memory of
+  # what the file said.
+  cp "$EXTRACT/ontrak/tier.env"      "$WORK/tier.env.rendered"
+  cp "$EXTRACT/ontrak/firstboot.env" "$WORK/firstboot.env.rendered"
+fi
 
 # ------------------------------------------------------------------- boot -----
 step "pointing the boot entries at the autoinstalls"
@@ -237,7 +333,7 @@ while IFS= read -r rel; do
   f="$EXTRACT/${rel#./}"
   if grep -q '/casper/vmlinuz' "$f"; then
     python3 "$INSTALLER_DIR/patch-grub.py" "$f" \
-      --machine-dir "$MACHINE_DIR" --choose-dir "$CHOOSE_DIR"
+      --machine-dir "$MACHINE_DIR" --choose-dir "$CHOOSE_DIR" --tier "$TIER_LABEL"
     PATCHED=$((PATCHED + 1))
   fi
 done <<< "$GRUB_FILES"
@@ -277,7 +373,12 @@ if ! printf '%s\0' "${ARGS[@]}" | grep -qz '^-V$'; then
 fi
 log "xorriso arguments: ${#ARGS[@]} entries"
 
-BUILT="$WORK/ontrak-installer.iso"
+# The image is written where it will be published, under a `.partial` name, and
+# renamed into place once every check below has passed. Two reasons, and the second
+# is the one that matters: a 3.8 GiB image copied afterwards needs the space twice,
+# and the image that is *verified* is then the image that ships rather than a copy
+# of it. A build that fails leaves something clearly marked as unfinished.
+BUILT="$OUT.partial"
 rm -f "$BUILT"
 xorriso_run -as mkisofs "${ARGS[@]}" -o "$BUILT" "$EXTRACT" >/dev/null
 
@@ -300,10 +401,16 @@ extract_from_image() { # extract_from_image <path-on-iso> — flattened into $WO
   xorriso_run -osirrox on -indev "$BUILT" -extract "/$rel" "$out" >/dev/null 2>&1 || true
   [[ -s "$out" ]] || die "the built ISO has no readable /$rel"
 }
-for f in "$MACHINE_DIR/user-data" "$MACHINE_DIR/meta-data" \
+PAYLOAD=("$MACHINE_DIR/user-data" "$MACHINE_DIR/meta-data" \
          "$CHOOSE_DIR/user-data" "$CHOOSE_DIR/meta-data" \
          ontrak/firstboot.sh ontrak/ontrak-firstboot.service \
-         ontrak/firstboot.env.example ontrak/README.txt; do
+         ontrak/firstboot.env.example ontrak/tier-check.py ontrak/README.txt)
+# A tiered image carries two more files, and they are the ones that decide what the
+# installed host does: its settings, and what machine it believes it is on.
+if [[ -n "$TIER" ]]; then
+  PAYLOAD+=(ontrak/tier.env ontrak/firstboot.env)
+fi
+for f in "${PAYLOAD[@]}"; do
   extract_from_image "$f"
 done
 log "payload present: both autoinstalls and the first-boot unit came back out of the image"
@@ -326,6 +433,20 @@ check_autoinstall() { # check_autoinstall <profile> <datasource dir>
 check_autoinstall machine "$MACHINE_DIR"
 check_autoinstall choose-disk "$CHOOSE_DIR"
 
+# The tier's own files, when this image has a tier. Both are read back off the image
+# and compared with the tier file they came from: a tier that says 64 GiB in its
+# README while baking the dev tier's pool sizing into the installed host is exactly
+# the mistake worth failing a build over, because nothing else would notice it.
+if [[ -n "$TIER" ]]; then
+  diff -q "$WORK/tier.env.rendered" "$WORK/verify/ontrak.tier.env" >/dev/null \
+    || die "the tier record on the ISO differs from $TIER_FILE"
+  diff -q "$WORK/firstboot.env.rendered" "$WORK/verify/ontrak.firstboot.env" >/dev/null \
+    || die "the first-boot settings on the ISO differ from $TIER_FILE"
+  grep -q "SIZING TIER: $TIER_LABEL" "$WORK/verify/ontrak.README.txt" \
+    || die "the README on the ISO does not name the $TIER_LABEL tier"
+  log "tier $TIER_LABEL: the tier record and the settings on the ISO are $TIER_FILE's,\n    and the README names the tier"
+fi
+
 # 2. the boot entries carry the autoinstalls, and the menu offers the choice
 xorriso_run -osirrox on -indev "$BUILT" \
   -extract /boot/grub/grub.cfg "$WORK/verify/grub.cfg" >/dev/null 2>&1 || true
@@ -346,6 +467,13 @@ grep -q "Install OnTrak on this machine's disk" "$WORK/verify/grub.cfg" \
   || die "the menu entries on the built ISO do not say they install on this machine's disk"
 grep -q 'Install OnTrak on the disk you choose' "$WORK/verify/grub.cfg" \
   || die "the built ISO has no entry for installing onto a disk you choose (a USB stick)"
+# A tiered image says so in the menu, because that is what an operator holding two
+# OnTrak sticks is looking at when they choose one.
+if [[ -n "$TIER" ]]; then
+  grep -q "Install OnTrak on this machine's disk (unattended) \[$TIER_LABEL\]" "$WORK/verify/grub.cfg" \
+    || die "the menu entries on the built ISO do not carry the $TIER_LABEL tier"
+  log "the menu entries are labelled [$TIER_LABEL]"
+fi
 # And the choose-disk entry has to free the medium, because the medium can be the
 # disk being installed to: without `toram` the installer would be erasing the
 # filesystem it is running from.
@@ -439,8 +567,9 @@ if [[ "${ONTRAK_ISO_SMOKE:-0}" == "1" ]]; then
 fi
 
 # --------------------------------------------------------------------- out ----
-step "writing $OUT"
-install -m 0644 "$BUILT" "$OUT"
+step "publishing $OUT"
+mv -f "$BUILT" "$OUT"
+chmod 0644 "$OUT"
 
 cat >"$CREDS" <<EOF
 OnTrak installer $RELEASE — default credentials
@@ -462,6 +591,7 @@ $(log "installer image ready")
   ISO         $OUT  ($SIZE_H)
   defaults    $CREDS
   base        Ubuntu $RELEASE LTS live-server, remastered
+  tier        ${TIER_LABEL:-none — the untiered image}
   first boot  Ubuntu, then Incus + the OnTrak checkout + the portal stack
 
 Write it to a USB stick (it boots from BIOS and UEFI):

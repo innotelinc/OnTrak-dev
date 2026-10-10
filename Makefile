@@ -19,7 +19,7 @@ REMOTE_OVERLAY := -f docker-compose.yml -f docker-compose.remote.yml
 .PHONY: help setup secrets check doctor validate test lint demo \
         catalog catalog-validate media-status media-fetch generate schedule \
         golden golden-import golden-pull templates pool reap demo-serve host-image landing \
-        installer-iso installer-iso-smoke installer-iso-test \
+        installer-iso installer-iso-smoke installer-iso-test installer-iso-tiers \
         build publish-image up up-remote down logs ps exec check-compose setup-log \
         docker-demo docker-shell provision provision-plan console-recreate \
         local-auth local-auth-down
@@ -49,6 +49,14 @@ doctor: check ## Alias for `check`
 
 installer-iso: ## Build the bootable range-host installer ISO
 	bash infra/build-installer-iso.sh
+
+installer-iso-tiers: ## Build one installer ISO per sizing tier (dev, class, full)
+	@# One image per class of machine, from one source: each tier bakes its own
+	@# first-boot settings (the warm pool above all) into the installed host, names
+	@# the machine it is for, and says so in its menu — see docs/installer.md,
+	@# "Sizing tiers". Each is a full build and a full verification, so this is
+	@# three times the work of `make installer-iso`.
+	ONTRAK_ISO_TIERS="dev class full" bash infra/build-installer-iso.sh
 
 installer-iso-smoke: ## Build the installer ISO, then boot it in QEMU to prove it installs
 	ONTRAK_ISO_SMOKE=1 bash infra/build-installer-iso.sh

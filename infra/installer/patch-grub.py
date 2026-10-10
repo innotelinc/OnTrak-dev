@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Give the live-server boot menu one OnTrak entry per autoinstall profile.
 
+An image built as a sizing tier also carries that tier's label in its titles
+(`… (unattended) [dev]`), so two OnTrak sticks in front of the operator are told
+apart by the menu they are looking at. See docs/installer.md, "Sizing tiers".
+
 Ubuntu's own menu says **"Try or Install Ubuntu Server"**, which is both wrong for
 this image (there is no live session on a server ISO — the only thing that boots is
 the installer) and silent about the thing an operator most needs to know: that
@@ -40,6 +44,10 @@ import sys
 
 TITLE_MACHINE = "Install OnTrak on this machine's disk (unattended)"
 TITLE_CHOOSE = "Install OnTrak on the disk you choose (USB stick, or another disk)"
+
+# Every installer title this script writes begins with this, whichever profile and
+# which tier it names — which is how a re-run recognises its own work.
+OURS_PREFIX = "Install OnTrak on "
 
 # `menuentry "title" --class ubuntu --class gnu-linux {` — the title is the first
 # quoted string, and the options after it are Canonical's.
@@ -129,6 +137,20 @@ def run_args(datasource: str, *, toram: bool) -> str:
     return " ".join(parts)
 
 
+def titles(tier: str = "") -> tuple[str, str]:
+    """The two titles, marked with the sizing tier's label when the image has one.
+
+    The label is on the *menu* and not only in the file name, because the operator
+    choosing a stick is reading this menu: `[dev]` says which of two OnTrak sticks is
+    the one sized for the machine in front of them. Everything else about the entries
+    is identical, so a tier never changes what an install does — only what it was
+    built for (see docs/installer.md, "Sizing tiers").
+    """
+    if not tier:
+        return TITLE_MACHINE, TITLE_CHOOSE
+    return f"{TITLE_MACHINE} [{tier}]", f"{TITLE_CHOOSE} [{tier}]"
+
+
 def retitle_line(line: str, ours: str) -> str:
     """A menuentry line with our title in place of Canonical's."""
     match = MENUENTRY.match(line)
@@ -137,21 +159,35 @@ def retitle_line(line: str, ours: str) -> str:
 
 
 def retitle(original_literal: str, ours: str) -> str:
-    """Our title for an entry, keeping anything that tells two entries apart."""
+    """Our title for an entry, keeping what tells two entries apart.
+
+    ``ours`` is the whole title — the sizing tier's label included, when the image
+    has one (see ``titles``). Two things survive from the title being replaced: the kernel
+    variant, because the standard and HWE entries are otherwise indistinguishable in
+    the menu, and — for a menu this script has never seen — Canonical's own name, as
+    a subtitle.
+
+    A title this script wrote is replaced *whatever it said*, so re-running over a
+    patched file, or building a tier into a tree that already carried a different
+    one, leaves one title rather than a growing list of them.
+    """
     original = original_literal.strip("\"'")
-    if original.startswith(ours):
-        return f'"{original}"'  # already ours: a re-run over a patched file
-    if "hwe" in original.lower():
-        return f'"{ours} [HWE kernel]"'
+    marks = " [HWE kernel]" if "hwe" in original.lower() else ""
+
+    if original.startswith(OURS_PREFIX):
+        return f'"{ours}{marks}"'  # ours already: a re-run, or another tier
     if "ubuntu server" in original.lower() or "try or install" in original.lower():
-        return f'"{ours}"'
+        return f'"{ours}{marks}"'
     # Some other menu Canonical ships: name it rather than losing the distinction.
-    return f'"{ours} [{original}]"'
+    return f'"{ours}{marks} [{original}]"'
 
 
-def patch(text: str, machine_dir: str, choose_dir: str) -> tuple[str, int, int]:
+def patch(text: str, machine_dir: str, choose_dir: str, tier: str = "") -> tuple[str, int, int]:
     """Return the patched grub.cfg, how many installer entries it has, and how many
     were added.
+
+    ``tier`` is the sizing tier's label, if the image has one: it is added to the
+    titles so the menu says which machine each image was built for.
 
     A file that already names the choose-disk datasource was written by a previous
     run — a failed build is re-run against a tree that may still be patched. That is
@@ -159,6 +195,7 @@ def patch(text: str, machine_dir: str, choose_dir: str) -> tuple[str, int, int]:
     entry per destination: pairing again would double the menu on every run.
     """
     lines = text.splitlines(keepends=True)
+    machine_title, choose_title = titles(tier)
     paired = f"ds=nocloud;s=/cdrom{choose_dir}/" in text
     out: list[str] = []
     cursor = 0
@@ -189,12 +226,12 @@ def patch(text: str, machine_dir: str, choose_dir: str) -> tuple[str, int, int]:
         # which targets a different disk and has no reason to copy the ISO into RAM.
         if paired:
             targets = (
-                [(choose_dir, True, TITLE_CHOOSE)]
+                [(choose_dir, True, choose_title)]
                 if f"ds=nocloud;s=/cdrom{choose_dir}/" in line
-                else [(machine_dir, False, TITLE_MACHINE)]
+                else [(machine_dir, False, machine_title)]
             )
         else:
-            targets = [(machine_dir, False, TITLE_MACHINE), (choose_dir, True, TITLE_CHOOSE)]
+            targets = [(machine_dir, False, machine_title), (choose_dir, True, choose_title)]
 
         out.extend(lines[cursor:start])
         for datasource, toram, title in targets:
@@ -216,11 +253,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("files", nargs="+", type=pathlib.Path)
     parser.add_argument("--machine-dir", default="/nocloud")
     parser.add_argument("--choose-dir", default="/nocloud-choose-disk")
+    parser.add_argument(
+        "--tier",
+        default="",
+        help="sizing tier label for the menu titles, e.g. dev (default: none)",
+    )
     args = parser.parse_args(argv)
 
     for path in args.files:
         text = path.read_text(encoding="utf-8")
-        patched, entries, added = patch(text, args.machine_dir, args.choose_dir)
+        patched, entries, added = patch(text, args.machine_dir, args.choose_dir, args.tier)
         if not entries:
             raise SystemExit(f"{path}: no /casper/vmlinuz boot entry to patch")
         path.write_text(patched, encoding="utf-8")

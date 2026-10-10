@@ -36,6 +36,14 @@
 #   ONTRAK_STORAGE_DRIVER, ONTRAK_STORAGE_SOURCE, … are passed straight through
 #   to infra/bootstrap-host.sh, so an operator can pick ZFS or btrfs for a real
 #   class from /etc/ontrak/firstboot.env.
+#
+#   ONTRAK_POOL__DEFAULT_TARGET, ONTRAK_POOL__MAX_TOTAL are the warm pool, and are
+#   exported to `make up`'s docker compose. A *sizing tier* (docs/installer.md)
+#   bakes them for the class of machine its image is built for; ontrak-tier-check.py
+#   checks this host against that tier and clamps them to the RAM it has.
+#
+#   ONTRAK_TIER_FILE        the tier record to read (default: /etc/ontrak/tier.env,
+#                           which only a tiered image installs)
 
 set -euo pipefail
 
@@ -90,6 +98,42 @@ step "OnTrak first-boot provisioning (started $STARTED)"
 log "host      : $(hostname)  (kernel $(uname -r))"
 log "repo      : $REPO_URL ($BRANCH)"
 log "checkout  : $REPO_DIR"
+
+# ---------------------------------------------------------------------- tier --
+# The sizing tier this image was built for, if it has one: one image per class of
+# machine (docs/installer.md, "Sizing tiers"). ontrak-tier-check.py reports how
+# this host compares with it and writes the pool sizing this machine's RAM holds —
+# prewarming to a target the host cannot hold is the documented way a range host
+# starts swapping (docs/operations.md). Its values are exported here, so `make up`'s
+# docker compose interpolates them ahead of anything in .env.
+TIER_SUMMARY="none — an untiered image"
+TIER_FILE="${ONTRAK_TIER_FILE:-/etc/ontrak/tier.env}"
+if [[ -f "$TIER_FILE" ]]; then
+  step "sizing tier"
+  TIER_CHECK="$(dirname "${BASH_SOURCE[0]}")/ontrak-tier-check.py"
+  TIER_EFFECTIVE="$STATE_DIR/tier-effective.env"
+  rm -f "$TIER_EFFECTIVE"
+  if command -v python3 >/dev/null 2>&1 && [[ -f "$TIER_CHECK" ]]; then
+    if python3 "$TIER_CHECK" --tier-file "$TIER_FILE" --firstboot-env "$CONFIG" \
+         --write-env "$TIER_EFFECTIVE"; then
+      if [[ -f "$TIER_EFFECTIVE" ]]; then
+        set -a
+        # shellcheck source=/dev/null  # written by ontrak-tier-check.py just above
+        . "$TIER_EFFECTIVE"
+        set +a
+        log "pool for this machine: target ${ONTRAK_POOL__DEFAULT_TARGET:-?}, ceiling ${ONTRAK_POOL__MAX_TOTAL:-?}"
+      fi
+      TIER_SUMMARY="$(sed -n 's/^TIER_TITLE=//p' "$TIER_FILE" | head -1)"
+      TIER_SUMMARY="${TIER_SUMMARY:-$(sed -n 's/^TIER_LABEL=//p' "$TIER_FILE" | head -1)}"
+    else
+      warn "the tier check failed; keeping the pool sizing in $CONFIG"
+    fi
+  else
+    warn "no python3, or no ontrak-tier-check.py beside this script: skipping the tier check"
+  fi
+else
+  log "no sizing tier on this image ($TIER_FILE is absent)"
+fi
 
 # ------------------------------------------------------------------ network --
 step "waiting for the network"
@@ -228,6 +272,7 @@ cat <<EOF
   checkout    $REPO_DIR
   log         $LOG
   hypervisor  $([[ "${BOOTSTRAP_OK:-0}" == 1 ]] && echo ready || echo 'NOT ready — see the warnings above')
+  tier        ${TIER_SUMMARY:-none — an untiered image}
 
 Next steps, from $REPO_DIR:
   make check                       # preflight: Python, Incus, KVM, storage, secrets

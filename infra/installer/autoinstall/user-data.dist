@@ -105,6 +105,14 @@ autoinstall:
     - cp /cdrom/ontrak/ontrak-firstboot.service /target/etc/systemd/system/ontrak-firstboot.service
     - cp /cdrom/ontrak/firstboot.env.example /target/etc/ontrak/firstboot.env.example
     - chmod 0644 /target/etc/ontrak/firstboot.env.example
+    # The sizing tier's own two files, on an image built as one: the settings that
+    # tier bakes (firstboot.env) and the machine it is for (tier.env, which the
+    # first boot reads back and checks this host against). One tolerant command
+    # rather than two `cp`s, because the untiered image has neither file and a
+    # failed late-command fails the whole install.
+    - bash -c 'for f in firstboot.env tier.env; do if [ -f "/cdrom/ontrak/$f" ]; then install -m 0644 "/cdrom/ontrak/$f" "/target/etc/ontrak/$f"; fi; done'
+    - cp /cdrom/ontrak/tier-check.py /target/usr/local/sbin/ontrak-tier-check.py
+    - chmod 0755 /target/usr/local/sbin/ontrak-tier-check.py
     - cp /cdrom/ontrak/README.txt /target/opt/ONTRAK-INSTALL.txt
     - curtin in-target -- systemctl enable ontrak-firstboot.service
 

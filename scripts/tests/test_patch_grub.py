@@ -154,6 +154,42 @@ class PatchGrubTests(unittest.TestCase):
         self._patch()
         self.assertEqual(self._menu_titles()[0], f'menuentry "{MACHINE_TITLE}"')
 
+    # -- and an image built as a sizing tier -------------------------------
+
+    def test_a_tiered_image_says_so_in_its_menu(self):
+        """Two OnTrak sticks in front of an operator are told apart by the menu.
+
+        The tier changes nothing about the install — same two entries, same
+        autoinstalls — so the label is the only thing on the media that says which
+        machine this image was built for.
+        """
+        result = self._patch(BASE_GRUB_CFG, "--tier", "dev")
+        self.assertEqual(result.returncode, 0, f"{result.stdout}\n{result.stderr}")
+        titles = self._menu_titles()
+        self.assertIn(f'menuentry "{MACHINE_TITLE} [dev]"', titles)
+        self.assertIn(f'menuentry "{CHOOSE_TITLE} [dev]"', titles)
+        # The kernel variant is kept, and it stays the closer of the two marks.
+        self.assertIn(f'menuentry "{MACHINE_TITLE} [dev] [HWE kernel]"', titles)
+        self.assertIn(f'menuentry "{CHOOSE_TITLE} [dev] [HWE kernel]"', titles)
+        # ...and the default entry is still the unattended one.
+        self.assertEqual(titles[0], f'menuentry "{MACHINE_TITLE} [dev]"')
+        for line in self._kernel_lines():
+            self.assertIn("console=ttyS0", line, line)
+
+    def test_rebuilding_a_tree_for_another_tier_replaces_the_label(self):
+        """The fan-out gives each tier its own extraction, but a re-run over a tree
+        that already carries one must not stack the labels up."""
+        self._patch(BASE_GRUB_CFG, "--tier", "dev")
+        result = self._patch(self.grub.read_text(encoding="utf-8"), "--tier", "class")
+        self.assertEqual(result.returncode, 0, f"{result.stdout}\n{result.stderr}")
+        titles = self._menu_titles()
+        self.assertIn(f'menuentry "{MACHINE_TITLE} [class]"', titles)
+        self.assertNotIn(f'menuentry "{MACHINE_TITLE} [class] [dev]"', titles)
+        self.assertFalse(
+            [title for title in titles if "[class]" in title and "[dev]" in title],
+            "the previous tier's label survived the re-patch",
+        )
+
     def test_the_machine_entry_carries_the_machine_autoinstall(self):
         self._patch()
         machine = [
@@ -197,7 +233,9 @@ class PatchGrubTests(unittest.TestCase):
         self._patch()
         for dirname in ("/nocloud", "/nocloud-choose-disk"):
             with self.subTest(datasource=dirname):
-                line = next(l for l in self._kernel_lines() if f"/cdrom{dirname}/" in l)
+                line = next(
+                    entry for entry in self._kernel_lines() if f"/cdrom{dirname}/" in entry
+                )
                 self.assertIn(f'autoinstall "ds=nocloud;s=/cdrom{dirname}/"', line, line)
                 # A bare `ds=nocloud;s=` would be truncated at the semicolon by grub.
                 self.assertNotIn("autoinstall ds=nocloud;s=", line, line)
