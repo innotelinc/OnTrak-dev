@@ -21,6 +21,11 @@ It flags:
      takes its closing quote as the opening quote of a value — which is how a
      marker constant came to be reported as a credential in this repository.
 
+     A mode name from the Fetch API is a mode, not a credential. Minified
+     bundles carry ``credentials = "same-origin"`` verbatim, which is what
+     blocked the dashboard's rebuilt chunk; telling it apart from a real pair
+     stored under that name takes both halves — see FETCH_CREDENTIALS_MODES.
+
      A value the line *builds* at run time is not stored either. When the literal
      is one operand of a concatenation and the same line draws on a random
      source (``os.urandom``, ``secrets``, ``token_hex`` …), no committed text is
@@ -28,6 +33,20 @@ It flags:
      ``"E2e-Sso-" + os.urandom(6).hex() + "!Aa1"`` is the case this spares. Both
      halves are required, so a secret merely split across two literals
      (``"hunter2" + "hunter2"``) still reads as a stored credential.
+
+     A value Next.js inlines into the client bundle is published, not stored:
+     the ``NEXT_PUBLIC_`` prefix is that compiler's own marker for "this ships
+     to every browser", so the only alternative to publishing it is not having
+     the feature. The dograh patch carried in this repository sets its Chatwoot
+     *website* token that way, and a widget token is public by design. The
+     prefix is the whole test — nothing is secret under a name the framework
+     advertises — and without it the whole-tree scan can never be green, which
+     is how a gate gets bypassed rather than satisfied.
+
+One exemption is impossible to infer from a path: a private-key *fixture*. A
+leaked PEM and a deliberate one are byte-identical at the header, so it is
+listed by path in ALLOWLIST together with the single rule it silences — every
+other rule still runs on that file.
 
 Matched values are masked in the output, so a finding never re-prints the
 secret it found.
@@ -82,6 +101,28 @@ LOCATION_VALUE = re.compile(r"^/[A-Za-z0-9._~/-]+$")
 # or symbols, so this cannot swallow one.
 FIELD_NAME_VALUE = re.compile(r"^[A-Z]+(_[A-Z]+)+$")
 
+# The Fetch API's RequestCredentials enum. ``credentials = "same-origin"`` is a
+# mode, not a credential, and a minified bundle carries it verbatim: the
+# dashboard's dist chunk holds ``p.credentials="omit"`` and its ``"same-origin"``
+# twin inside the fetch wrapper, which blocked every rebuild of that bundle (the
+# whole file is re-added when the chunk hash changes, so the hook rescans it).
+# The name alone cannot exempt it — a variable called `credentials` can hold a
+# real pair such as "user:hunter2" — so both halves are required: the name *is*
+# `credentials`, and the value is one of the three modes the spec defines.
+# Nothing else is a mode name.
+FETCH_CREDENTIALS_NAME = re.compile(r"^credentials$", re.IGNORECASE)
+FETCH_CREDENTIALS_MODES = frozenset({"omit", "same-origin", "include"})
+
+# A value Next.js *requires* to be inlined into the client bundle is not a stored
+# credential: the `NEXT_PUBLIC_` prefix is the compiler's own marker that the
+# value ships to every browser, so publishing it is the point rather than the
+# mistake. dograh's carried upstream patch sets its Chatwoot *website* token this
+# way (`NEXT_PUBLIC_CHATWOOT_TOKEN`), and a widget token is public by design —
+# without the exemption the whole tracked tree can never be clean, and a gate
+# that always fails is one people learn to bypass. The prefix is the whole test:
+# nothing is secret under a name the framework advertises as client-visible.
+NEXT_PUBLIC_NAME = re.compile(r"^NEXT_PUBLIC_", re.IGNORECASE)
+
 # A vault:// reference names the secret to fetch at runtime (scheme, path,
 # optional #field) — the value in the file is a pointer, not the secret.
 VAULT_REFERENCE = re.compile(r"^vault://", re.IGNORECASE)
@@ -133,6 +174,33 @@ SHAPES: list[tuple[str, re.Pattern[str]]] = [
 TEST_PATH = re.compile(
     r"(^|/)(tests?|__tests__|spec|fixtures?)/|\.(test|spec)\.[A-Za-z]+$", re.IGNORECASE
 )
+
+# A deliberately committed *private-key* fixture cannot be told apart from a
+# leaked one by its shape — the PEM header is byte-identical — so the exemption
+# has to be explicit and per-file rather than inferred from the path. This is
+# the one place the `fixtures/` relaxation above is not enough: that relaxation
+# only covers the literal-assignment rule, while a PEM keeps tripping the
+# `private-key-block` shape rule. Each entry names the path and exactly the one
+# rule it silences; every other rule still applies to that file, so a provider
+# key committed into the same fixture is still caught.
+#
+# scripts/fixtures/cerulean-api-fixture.key is a throwaway key generated for the
+# Cerulean trust-plane test (vendored with the MS Teams Direct Routing wizard).
+ALLOWLIST: dict[str, frozenset[str]] = {
+    "scripts/fixtures/cerulean-api-fixture.key": frozenset({"private-key-block"}),
+}
+
+
+def is_allowlisted(label: str, rule: str) -> bool:
+    """Is `rule` explicitly silenced for the file `label` names?
+
+    History labels carry a revision prefix (`0caf908:path`), so match either the
+    bare path or a `:<path>` suffix.
+    """
+    for path, rules in ALLOWLIST.items():
+        if rule in rules and (label == path or label.endswith(":" + path)):
+            return True
+    return False
 
 BINARY_SUFFIXES = {
     ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".pdf", ".zip", ".gz",
@@ -220,6 +288,8 @@ def scan_text(label: str, text: str) -> list[Finding]:
         for rule, pattern in SHAPES:
             match = pattern.search(line)
             if match:
+                if is_allowlisted(label, rule):
+                    continue
                 findings.append((label, number, rule, mask(match.group(0))))
 
         if relaxed:
@@ -235,11 +305,15 @@ def scan_text(label: str, text: str) -> list[Finding]:
             value = match.group("value")
             if not SENSITIVE_NAME.search(name):
                 continue
+            if NEXT_PUBLIC_NAME.match(name):
+                continue
             if is_placeholder(value):
                 continue
             if NAMESPACED_IDENTIFIER_KEY.search(name) and NAMESPACED_IDENTIFIER_VALUE.match(value):
                 continue
             if FIELD_NAME_VALUE.match(value):
+                continue
+            if FETCH_CREDENTIALS_NAME.match(name) and value.strip().lower() in FETCH_CREDENTIALS_MODES:
                 continue
             if LOCATION_NAME.search(name) and LOCATION_VALUE.match(value):
                 continue
