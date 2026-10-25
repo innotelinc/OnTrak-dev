@@ -100,6 +100,10 @@ need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required ($2)"; }
 # fan-out — every tier gets its own extraction, rendering, verification and output,
 # so an image is never assembled from a tree another tier has been through.
 TIER="${ONTRAK_ISO_TIER:-}"
+# An untiered build still labels its menu, it just has no tier to name. These are
+# set here so `set -u` does not abort the patcher on the untiered path.
+TIER_LABEL=""
+TIER_TITLE=""
 if [[ -z "$TIER" && -n "${ONTRAK_ISO_TIERS:-}" ]]; then
   TIERS="${ONTRAK_ISO_TIERS//,/ }"
   COUNT="$(wc -w <<<"$TIERS")"
