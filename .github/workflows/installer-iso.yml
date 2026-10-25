@@ -123,10 +123,23 @@ jobs:
           xorriso -osirrox on -indev "$iso" -extract /nocloud/user-data "$RUNNER_TEMP/user-data" >/dev/null
 
           echo "--- interactive sections ---"
+          # render-autoinstall.py writes the list inline (`[identity]`), and an
+          # autoinstall may equally write it as a block of `- item` lines. Read
+          # both, so the check measures the sections rather than the style.
           mapfile -t sections < <(awk '
-            /^  interactive-sections:/ { f=1; next }
-            f && /^  [^ ]/             { exit }
-            f && /^[[:space:]]+-/      { gsub(/^[[:space:]]+-[[:space:]]*/, ""); print }
+            /^[[:space:]]*interactive-sections:/ {
+              v = $0
+              sub(/^[[:space:]]*interactive-sections:[[:space:]]*/, "", v)
+              if (v ~ /^\[/) {
+                gsub(/[][[:space:]]/, "", v)
+                n = split(v, a, ",")
+                for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
+                exit
+              }
+              f = 1; next
+            }
+            f && /^[[:space:]]+-/ { l = $0; sub(/^[[:space:]]+-[[:space:]]*/, "", l); print l; next }
+            f { exit }
           ' "$RUNNER_TEMP/user-data")
           printf '  %s\n' "${sections[@]:-<none>}"
 
