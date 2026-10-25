@@ -4,7 +4,7 @@
 
 **IT Support Training Platform powered by Innotel OnTrak — Windows, Server, Office and Linux, ticketed and graded.**
 
-[![CI](https://github.com/innotelinc/OnTrak/actions/workflows/ci.yml/badge.svg)](https://github.com/innotelinc/OnTrak/actions/workflows/ci.yml)
+[![CI](https://github.com/innotelinc/OnTrak-dev/actions/workflows/ci.yml/badge.svg)](https://github.com/innotelinc/OnTrak-dev/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -15,7 +15,8 @@
 > student in the browser, and grades the work from live system state *and* the written
 > ticket. It runs on Ubuntu + Incus, consumes Cerulean for identity and trust, and keeps
 > only results — never progress.
-> **Landing page:** [https://innotelinc.github.io/OnTrak/](https://innotelinc.github.io/OnTrak/)
+> **Landing page (this repository):** [https://innotelinc.github.io/OnTrak-dev/](https://innotelinc.github.io/OnTrak-dev/)
+> **Product site:** [https://innotelinc.github.io/OnTrak/](https://innotelinc.github.io/OnTrak/)
 > **Range:** [https://ontrak.innotel.us/](https://ontrak.innotel.us/) — the deployed portal,
 > with the browser console on the same TLS host at `/guacamole/`. Students are given
 > [student.ontrak.innotel.us](https://student.ontrak.innotel.us/) and instructors
@@ -54,8 +55,8 @@
 Two commands, no hypervisor, no Windows image:
 
 ```bash
-git clone https://github.com/innotelinc/OnTrak.git
-cd OnTrak
+git clone https://github.com/innotelinc/OnTrak-dev.git
+cd OnTrak-dev
 ./scripts/setup.sh
 make demo            # a full class: assign, provision, grade, submit, tear down
 make demo-serve      # the student portal, in demo mode, at http://127.0.0.1:8080

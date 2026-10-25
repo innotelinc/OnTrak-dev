@@ -114,7 +114,7 @@
           <a href="#how">How it works</a>
           <a href="#platforms">Platforms</a>
           <a href="#scenarios">Scenarios</a>
-          <a class="gh" href="https://github.com/innotelinc/OnTrak">GitHub ↗</a>
+          <a class="gh" href="https://github.com/innotelinc/OnTrak-dev">GitHub ↗</a>
         </nav>
       </div>
     </div>
@@ -135,12 +135,12 @@
         </p>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://ontrak.innotel.us/">Open the range ↗</a>
-          <a class="btn btn-secondary" href="https://github.com/innotelinc/OnTrak#quick-start">Get started</a>
-          <a class="btn btn-secondary" href="https://github.com/innotelinc/OnTrak/blob/main/docs/scenarios.md">Scenario catalogue</a>
+          <a class="btn btn-secondary" href="https://github.com/innotelinc/OnTrak-dev#quick-start">Get started</a>
+          <a class="btn btn-secondary" href="https://github.com/innotelinc/OnTrak-dev/blob/main/docs/scenarios.md">Scenario catalogue</a>
         </div>
         <div class="quickstart">
           <code id="qs"><span class="c"># no hypervisor needed — runs in memory</span>
-git clone https://github.com/innotelinc/OnTrak.git &amp;&amp; cd OnTrak
+git clone https://github.com/innotelinc/OnTrak-dev.git &amp;&amp; cd OnTrak-dev
 ./scripts/setup.sh
 make demo</code>
           <button class="copy" data-copy="#qs" type="button">Copy</button>
@@ -151,6 +151,14 @@ make secrets &amp;&amp; make up
 <span class="c"># portal :8080 · console :8080/guacamole/ · the broken machines stay Incus VMs</span></code>
           <button class="copy" data-copy="#qs-docker" type="button">Copy</button>
         </div>
+        <p style="color: var(--p-text-muted); font-size: 13.5px; margin: 18px 0 0; max-width: 720px;">
+          Bare metal? <code>make installer-iso</code> builds a bootable Ubuntu Server 24.04 image
+          that leaves the machine a ready range host — Incus, the lab bridge, the checkout and the
+          portal stack — and stops on one screen, <strong>identity</strong>, so no credential is
+          baked into a copied image. <code>make installer-iso-tiers</code> emits one image per
+          sizing tier (dev, class, full), and <code>ONTRAK_ISO_SMOKE=1</code> boots it in QEMU
+          before anyone puts it on a stick. The build is held by CI.
+        </p>
       </div>
 
       <div class="stats">
@@ -245,8 +253,8 @@ make secrets &amp;&amp; make up
   <footer>
     <div class="wrap foot-inner">
       <span>OnTrak — IT support training range for the Innotel Platform Stack.</span>
-      <a href="https://github.com/innotelinc/OnTrak">Source</a>
-      <a href="https://github.com/innotelinc/OnTrak/blob/main/LICENSE">MIT License</a>
+      <a href="https://github.com/innotelinc/OnTrak-dev">Source</a>
+      <a href="https://github.com/innotelinc/OnTrak-dev/blob/main/LICENSE">MIT License</a>
       <a href="https://github.com/innotelinc/innotel-platform-stack">Platform stack</a>
     </div>
   </footer>
